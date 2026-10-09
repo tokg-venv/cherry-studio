@@ -33,6 +33,7 @@ describe('validation selection', () => {
     expect(mixed.projects).not.toContain('main')
   })
   it.each([
+    ['packages/agent-runtime/src/session.ts', ['agent-runtime']],
     ['packages/ai-sdk-provider/src/model.ts', ['ai-sdk-provider', 'aiCore', 'main', 'renderer']],
     ['packages/remote-protocol/src/agent.ts', ['remote-protocol', 'remote-transport', 'main', 'renderer']],
     ['packages/remote-transport/src/socket.ts', ['remote-transport', 'main', 'renderer']],
