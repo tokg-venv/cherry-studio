@@ -11,6 +11,22 @@ export {
   createAskUserExtension
 } from './askUserExtension'
 export type { AgentRuntimeCompaction, CompactionSummarizer, CompactionSummaryRequest } from './compaction'
+export {
+  createGoalExtension,
+  GOAL_TOOL_NAMES,
+  type GoalApprovalEvent,
+  type GoalPort,
+  type GoalVerifier
+} from './goalExtension'
+export {
+  GOAL_NOTICE_TYPE,
+  GOAL_ROUND_TYPE,
+  GOAL_STATE_TYPE,
+  type GoalBudget,
+  type GoalPhase,
+  type GoalSnapshot,
+  type GoalStopCode
+} from './goalState'
 export type { ToolOutputOffload, ToolOutputStore } from './offload'
 export type {
   ModelCallInfo,
