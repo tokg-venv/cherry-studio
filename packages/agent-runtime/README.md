@@ -201,7 +201,8 @@ handles.
   notes), `declined` (optional `feedback`) or `unavailable` (no one can answer, e.g. a channel or
   scheduled run); inside a subagent's session it ends as `unavailable` without asking the port. The
   result text tells the model what happened; only `answered` is a success. Every result the tool
-  returns, aborted included, has `details` `{ questions, answers, annotations? }`;
+  returns, aborted included, has `details` `{ questions, answers, annotations?, outcome }`, `outcome`
+  being `'answered' | 'declined' | 'unavailable' | 'aborted'`;
   invalid input and a rejecting port fail the call with empty `details`. Calls in
   one model step run one at a time. When the turn aborts, the tool stops waiting at once and the
   request's `signal` aborts so the host can withdraw the question; a late answer is ignored. A
