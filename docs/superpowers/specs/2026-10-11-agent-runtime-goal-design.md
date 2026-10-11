@@ -116,7 +116,7 @@ type GoalCleared = { id: string; revision: number; cleared: true; at: number }
 
 清除写入 `GoalCleared` 墓碑；之后"当前目标"为空。历史快照留在 transcript 里，不删。
 
-`phase` 的含义固定：`active` 可续跑；`paused` 由人停下（pause、每轮确认、中止）；`blocked` 不改变条件就无法继续（上限、预算、无进展、审批被拒、错误、模型自报受阻）；`complete` 已达成。四者之外的细节都在 `lastStop.code` 里。
+`phase` 的含义固定：`active` 可续跑；`paused` 由人停下（pause、每轮确认、中止）；`blocked` 不改变条件就无法继续（上限、预算、无进展、审批被拒、错误、模型自报受阻）；`complete` 已达成。四者之外的细节都在 `lastStop.code` 里。goal 重新进入 `active` 时（`resume`，以及 `edit` 把 `round_limit` / `budget_exhausted` 的目标恢复为 `active`）清除 `lastStop`。
 
 ### 5.2 停止原因码
 
@@ -252,7 +252,7 @@ Summarize what is done, what is verified, and what remains, then stop.
 Pi 的处理器按加载顺序串行组合，后加载的扩展可以覆盖 `entries` 和 `continue`，提出方不会收到回执。所以 `roundsStarted` 不在返回 `continue: true` 时递增，而在确认被接纳时递增：
 
 - 下一个 `turn_start`：检查 `ctx.sessionManager.getBranch()` 末尾是否是本扩展的 `cherry.goal-round` 条目，且 `details` 与预约一致。一致则追加快照 `roundsStarted + 1`（wrap-up 轮同时置 `wrapUpDone = true`），清空预约。`edit` 调高 `maxGoalRounds` 或 `budget` 时把 `wrapUpDone` 重置为 `false`，触顶后的目标才能再次续跑。
-- 若先到的是 `agent_settled`：预约作废，追加快照 `lastStop = continuation_rejected`，`armed = false`，phase 不变。宿主据此在 UI 上提示"续跑被拒绝"。
+- 若先到的是 `agent_settled`：预约作废，追加快照 `phase = 'blocked'`、`lastStop = continuation_rejected`（与 5.2 一致），`armed = false`。宿主据此在 UI 上提示"续跑被拒绝"。
 
 这和 DSH 的"只有被接纳的 goal 消息才推进轮数"一致。
 
@@ -325,17 +325,18 @@ update_goal(goal_id, revision, action, objective?, max_goal_rounds?, budget_toke
   action: 'edit' | 'pause' | 'resume' | 'complete' | 'blocked'
 ```
 
-输出统一为 `{ goal: null }` 或 `{ goal: GoalSnapshot 的只读视图, activation: 'armed' | 'disarmed' }`。空字符串和 0 视为未填（弱模型常用它们填可选字段）。
+输出统一为 `{ goal: null }` 或 `{ goal: GoalSnapshot 的只读视图, activation: 'armed' | 'disarmed' }`。空字符串和 0 视为未填（弱模型常用它们填可选字段），负数按非法值拒绝（`invalid_limit`）。
 
 权限规则（在 `execute` 里判定，用 branch 上的事实，可回放）：
 
 | 动作 | 条件 |
 |---|---|
-| `create`、`edit`、`pause`、`resume` | 当前宿主回合是人类回合：branch 上当前 assistant 之前的最后一条用户侧消息不是 `cherry.goal-round` |
+| `create`、`edit`、`pause`、`resume` | 当前宿主回合是人类回合：branch 上最后一条用户消息或 goal 轮消息是用户消息；其他扩展的 `custom_message` 不参与判断 |
 | `complete`、`blocked` | 人类回合或 goal 轮都可以 |
 | `create` | 当前没有目标，或当前目标已 `complete` |
-| `resume` | phase 为 `paused` 或 `blocked`，且有余量（轮数和预算都未触顶）；`active` 但 disarmed 时只重新武装 |
-| `edit` | 可改 objective、`max_goal_rounds`、`budget_tokens`、`budget_usd`；调高上限时重置 `wrapUpDone`，并把 `round_limit` / `budget_exhausted` 导致的 `blocked` 恢复为 `active`（仍需 `resume` 才武装） |
+| `resume` | phase 为 `paused` 或 `blocked`，且有余量（轮数和预算都未触顶）；`active` 但 disarmed 时只重新武装；`active` 且已武装时什么都不改（不追加快照）；`complete` 的目标拒绝 |
+| `edit` | 可改 objective、`max_goal_rounds`、`budget_tokens`、`budget_usd`；调高上限时重置 `wrapUpDone`，并把 `round_limit` / `budget_exhausted` 导致的 `blocked` 恢复为 `active`（仍需 `resume` 才武装）；不带任何字段的 `edit` 是 `invalid_action`，什么都不改 |
+| `pause` | `paused` 的目标上什么都不改（不追加快照）；`complete` 的目标拒绝 |
 | 所有变更 | `goal_id` 和 `revision` 与当前一致，否则返回 stale 错误并附当前视图 |
 
 模型调用 `create_goal` 需要用户确认：宿主把 `create_goal` 的审批策略设为"询问"（而不是 DSH 声明的 auto），现有审批卡片会把 objective 作为工具入参展示。包内不做；这是成本最低的方案。
@@ -346,15 +347,15 @@ update_goal(goal_id, revision, action, objective?, max_goal_rounds?, budget_toke
 
 | 输入 | 行为 |
 |---|---|
-| `/goal` | 返回当前状态文本：objective、phase、`roundsStarted/maxGoalRounds`、token、activation、lastStop |
+| `/goal` | 返回状态文本：objective、phase（附最近一次停止）、activation、轮数 `roundsStarted/maxGoalRounds`、token（金额非零时附上） |
 | `/goal <objective>` | 创建并武装；已有未完成目标时报错，提示先 clear 或 edit |
 | `/goal edit <objective>` | 改 objective，phase 和 activation 不变 |
-| `/goal pause` | phase=paused，中止当前轮 |
+| `/goal pause` | phase=paused；仅当 goal 原为 `active` 且 agent 正忙时中止当前轮 |
 | `/goal resume` | 重新武装；`confirm-each-round` 模式下只跑一轮；无余量时报错 |
-| `/goal clear` | 写墓碑，中止当前轮 |
-| `/goal rounds <n>` / `/goal budget <tokens>` / `/goal budget $<usd>` | 调上限或预算（轮数受绝对上限约束） |
+| `/goal clear` | 写墓碑；仅当 goal 原为 `active` 且 agent 正忙时中止当前轮 |
+| `/goal rounds <n>` / `/goal budget <tokens>` / `/goal budget $<usd>` | 调上限或预算（轮数受绝对上限约束）；仅当 `rounds` / `budget` 后恰好跟一个数字时才是子命令，否则整条输入都是 objective |
 
-控制词只在占满整个输入时生效；其余非空输入都是 objective。命令的反馈文本写成 `cherry.goal-notice` 状态条目（`{ text, level: 'info' | 'error' }`），由 L2 作为 `state` 条目送到宿主，宿主作为一次性提示展示；它不进入模型上下文，也不参与重建。
+控制词只在占满整个输入时生效；`rounds` / `budget` 仅在后面恰好跟一个数字时是子命令（`budget` 也接受 `$<数字>`），否则整条输入都是 objective；控制词和子命令词大小写不敏感；其余非空输入都是 objective。命令的反馈文本写成 `cherry.goal-notice` 状态条目（`{ text, level: 'info' | 'error' }`），由 L2 作为 `state` 条目送到宿主，宿主作为一次性提示展示；它不进入模型上下文，宿主不必持久化它；若持久化，重建时回放无害。
 
 ### 8.3 能力门控
 
@@ -406,7 +407,7 @@ interface GoalPort {
 - 三个操作：停本轮 → `session.abort()`；暂停 → `/goal pause`；清除 → `/goal clear`。
 - `create_goal` 的审批策略设为"询问"。
 - 启动 goal 时若审批模式为 `default`，提示"每个需要审批的工具都会停下等你"。
-- 遥测：每条带 `lastStop` 的快照记一次事件（code、roundsStarted、tokensUsed、时长）；用户在 `complete` 之后的同一会话里继续发消息并再次创建或恢复目标，记为"用户推翻完成"。
+- 遥测：每次出现新的 `lastStop`（以 `lastStop.at` 区分）记一次事件（code、roundsStarted、tokensUsed、时长）；用户在 `complete` 之后的同一会话里继续发消息并再次创建或恢复目标，记为"用户推翻完成"。
 
 ## 11. 与 L2 的衔接
 
