@@ -17,6 +17,7 @@ import { type ToolOutputOffload, toolOutputOffloadExtension } from './offload'
 import type { ModelCallPort, ModelCallSideChannel } from './ports'
 import { rebuildSessionEntries } from './rebuild'
 import { recallExtension } from './recall'
+import { subagentExtension, type SubagentPort } from './subagent'
 import type { TranscriptEntry } from './transcript'
 import { type AgentRuntimeEvent, TranscriptTap } from './transcriptTap'
 
@@ -77,6 +78,8 @@ export interface AgentRuntimeSessionOptions<TRequestOptions = undefined> {
   offload?: ToolOutputOffload
   /** Registers `vcc_recall` over this session's transcript. */
   recall?: boolean
+  /** Registers `subagent`; the host configures each subagent through this port. Off when omitted. */
+  subagents?: SubagentPort
   settings?: AgentRuntimeSettings
   /** Pi's own thinking level (default `off`). It does not reach the model request. */
   thinkingLevel?: CreateAgentSessionOptions['thinkingLevel']
@@ -149,6 +152,14 @@ export async function createAgentRuntimeSession<TRequestOptions>(
       ? [compactionSummaryExtension(compaction.summarize, (message) => (tap.summaryFailure = message))]
       : []),
     ...(options.recall ? [recallExtension(() => tap.entries())] : []),
+    ...(options.subagents
+      ? [
+          subagentExtension({
+            port: options.subagents,
+            createSession: (overrides) => createAgentRuntimeSession({ ...options, ...overrides, subagents: undefined })
+          })
+        ]
+      : []),
     ...(options.extensionFactories ?? []),
     // Last, so it sees what other `tool_result` handlers made of the output.
     ...(options.offload ? [toolOutputOffloadExtension(options.offload)] : [])

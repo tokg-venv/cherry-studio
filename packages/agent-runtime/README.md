@@ -140,6 +140,20 @@ the same once the host stores the running turn and rebuilds. `query` is a keywor
 words first, 5 per page), `range: [from, to]` lists entries in order (20 per page) and `expand: [N]`
 returns full text. `scope: 'all'` is the same as `'lineage'`: edits drop the turns after them.
 
+## Subagents
+
+`subagents: SubagentPort` registers `subagent({ description, prompt })`, a `model-only` tool with DSH's
+name, so Cherry's renderer shows it as a Task card. Each call builds a session in-process from the
+parent's options (port, request options, model, prompts, tools, compaction, offload, recall,
+settings) plus the extensions the host returns from `SubagentPort.configure(subagent)`, starts it
+with `session.prompt()` so `before_agent_start` handlers run as in any turn, waits for it to settle
+and disposes it. The call blocks: the subagent's final message is the call's result, `details` is
+`{ sessionId, fork, outcome }`, and the result's `usage` is the sum of the subagent's replies (for
+budgets; the host already accounted each request). Its transcript events go only to the `onEvent`
+the host returned; `onSessionCreated` receives its session before its first request. Its session id
+is `<parent session id>.<call id>`, characters Pi rejects in the call id replaced by `-`. Subagent
+calls of one step run at the same time, and a subagent has no `subagent` tool of its own.
+
 ## Extensions
 
 Factories the host passes in `extensionFactories`. Both tools are `model-only` (never callable from
@@ -168,6 +182,8 @@ handles.
 The host's approval layer must not ask approval for `AskUserQuestion` (the question is itself the
 interaction, or the user would be asked twice) and may auto-allow `todo_write` (it only changes the
 session's list). `ASK_USER_TOOL_NAME` and `TODO_TOOL_NAME` hold the names.
+
+The approval layer may auto-allow `subagent`: each call the subagent makes is approved on its own.
 
 ## Known gaps
 
