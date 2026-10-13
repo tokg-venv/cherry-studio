@@ -86,7 +86,7 @@ packages/agent-runtime/tests/goal*.test.ts
 | `turn_end` | 记账：本轮是否有进展、累计 token、是否有待处理的停止请求 |
 | `agent_before_settle` | 唯一的续跑决策点（见 6） |
 | `turn_start` / `message_end` | 确认续跑被接纳（见 6.3：命令开的轮看 round 消息的 `message_end`，在 `agent_before_settle` 续跑的轮看下一个 `turn_start` 时 branch 上最后一条 message 条目之后的 round 消息，其他扩展追加的条目跳过）；用户消息的 `message_end`：标记人类回合开始（见 6.1） |
-| `agent_settled` | 清理未被接纳的预约（记 `continuation_rejected`）；运行被中止时把 `active` 的目标记为 `paused / aborted`（见 7.6）；不做任何续跑 |
+| `agent_settled` | 清理未被接纳的预约（记 `continuation_rejected`）；运行被中止时把 `active` 且已武装的目标记为 `paused / aborted`（见 7.6）；不做任何续跑 |
 
 宿主侧没有新的 IPC 或 DataApi：goal 的全部状态通过 L2 的 `cherry.goal` 状态条目进入 transcript，宿主按已有的 `transcript-append` 事件存储和渲染。
 
@@ -270,7 +270,7 @@ Pi 的处理器按加载顺序串行组合，后加载的扩展可以覆盖 `ent
 
 ### 6.4 `agent_settled`
 
-清理预约（6.3）；本次运行被中止（`aborted: true`）且目标仍是 `active` 时记 `paused / aborted`（7.6；中止压过 `continuation_rejected`）；不续跑。宿主回合到此结束，session 随后被宿主丢弃。
+清理预约（6.3）；本次运行被中止（`aborted: true`）且目标仍是 `active`、已武装时记 `paused / aborted`（未武装的目标没有在跑，中止一个无关的回合不改它，与 6.2 第 2 条一致）（7.6；中止压过 `continuation_rejected`）；不续跑。宿主回合到此结束，session 随后被宿主丢弃。
 
 ## 7. 停止策略
 
@@ -362,7 +362,7 @@ update_goal(goal_id, revision, action, objective?, max_goal_rounds?, budget_toke
 |---|---|
 | `/goal` | 返回状态文本：objective、phase（附最近一次停止）、activation、轮数 `roundsStarted/maxGoalRounds`、token（金额非零时附上） |
 | `/goal <objective>` | 创建并武装；已有未完成目标时报错，提示先 clear 或 edit |
-| `/goal edit <objective>` | 改 objective，phase 和 activation 不变 |
+| `/goal edit <objective>` | 改 objective，phase 和 activation 不变；`edit` 后为空时按其余子命令处理（没有目标就回答没有目标），不把 "edit" 当成 objective |
 | `/goal pause` | phase=paused；仅当 goal 原为 `active` 且 agent 正忙时中止当前轮 |
 | `/goal resume` | 重新武装；`confirm-each-round` 模式下只跑一轮；无余量时报错 |
 | `/goal clear` | 写墓碑；仅当 goal 原为 `active` 且 agent 正忙时中止当前轮 |
