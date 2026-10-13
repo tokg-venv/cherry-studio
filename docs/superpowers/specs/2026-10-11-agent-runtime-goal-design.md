@@ -1,10 +1,10 @@
 # Agent runtime goal 设计
 
-状态：待评审 · 2026-10-11 · 实施排在 L4（执行环境）之后
+状态：实施中（任务 1–4 已实现）· 2026-10-11，2026-10-13 按 L4 子代理修订 · 基于 L4（PR #21578）
 
 ## 1. 背景与目标
 
-Cherry 正把 Pi 做成唯一的 agent runtime（L1 #21436 桥接、L2 #21437 transcript、L3 #21438 todo / AskUserQuestion）。goal 是 DSH runtime 已有、Pi runtime 还没有的能力：用户给一个长期目标，agent 在没有新的人类消息时自动续跑多轮，直到完成、受阻或被停下。
+Cherry 正把 Pi 做成唯一的 agent runtime（L1 #21436 桥接、L2 #21437 transcript、L3 #21438 todo / AskUserQuestion、L4 #21578 前台子代理）。goal 是 DSH runtime 已有、Pi runtime 还没有的能力：用户给一个长期目标，agent 在没有新的人类消息时自动续跑多轮，直到完成、受阻或被停下。
 
 这份 spec 定义 Pi 版 goal 在 `packages/agent-runtime` 里的实现，以及宿主（Cherry）要提供的接口。它基于两项调研结论（完整报告见 `reports/编码代理自主目标续跑对比.md`，不随仓库提交）：
 
@@ -18,15 +18,15 @@ Cherry 正把 Pi 做成唯一的 agent runtime（L1 #21436 桥接、L2 #21437 tr
 - 等待外部事件的 `waiting` 状态和调度器（wakeup / cron）。
 - 宿主侧的独立完成核验实现（本 spec 只定义端口）。
 - 每轮全新上下文的 Ralph 模式。
-- 子 agent 的 token 用量归并到父 goal 预算。
 - 替用户做审批决定的 AI 审批员。
+- plan 模式下不启动自主续跑轮（Claude Code 和 Codex 在 plan 模式下都不跑自主轮）。这属于宿主接入 / 权限 PR：宿主知道当前权限模式，包不知道。以后需要时可以在 `GoalPort` 上加一个可选钩子，让宿主在 plan 模式下拒绝开新轮；可选成员不破坏现有接口。
 
 ## 2. 术语
 
 | 词 | 含义 |
 |---|---|
 | 宿主回合 | 一条用户消息触发的一次 `session.prompt()`，到 `agent_settled` 为止。每个宿主回合都重建一个新的 Pi session（L2） |
-| 轮（round） | goal 在一个宿主回合内的一次自动续跑：一条 `cherry.goal-round` 消息加上随后的模型请求和工具循环 |
+| 轮（round） | goal 在一个宿主回合内的一次自动续跑：一条 `cherry.goal-round` 消息加上随后的模型请求和工具循环。一轮仍是"父代理停下后被推一次"；子代理内部的请求不算轮，它们在父代理的一次 `subagent` 工具调用里跑完，属于这次调用所在的轮（用量见 6.1） |
 | 续跑 | 在 `agent_before_settle` 返回 `continue: true`，让 Pi 在同一次运行里再发起一次模型请求 |
 | 武装（armed） | 进程内标志，表示允许自动续跑。不持久化；每个新 session 从 disarmed 起步 |
 | 人类回合 | 当前宿主回合由用户消息发起，而不是由 goal 轮消息发起 |
@@ -57,14 +57,16 @@ Cherry 正把 Pi 做成唯一的 agent runtime（L1 #21436 桥接、L2 #21437 tr
 - Ralph 模式。
 - 用一期遥测数据修正默认值。
 
-### 3.3 与 L4 的依赖
+### 3.3 与权限模式、子代理的衔接
 
-两处交叉点通过 `GoalPort` 注入，接口在本 spec 里定下，实现等 L4：
+两处交叉点通过 `GoalPort` 的可选成员注入，接口在本 spec 里定下：
 
-- `onApproval`：审批请求的 pending / granted / denied / unavailable 事件。来源是宿主的 `ToolApprovalRegistry`，模式语义以 #19591 统一后的 `default / edit / auto / full` 为准。
-- `hasRunningChildren`：是否有后台子 agent 在跑。有则本轮结束后不开新轮，记为 `waiting_children` 并暂停。
+- `onApproval`：审批请求的 pending / granted / denied / unavailable 事件。来源是宿主的 `ToolApprovalRegistry`，由宿主接入 PR 接线（L4 不涉及审批）。权限模式按 Claude Code 分五档：auto（默认）/ manual / edit / plan / full，存储值依次为 `auto / default / acceptEdits / plan / bypassPermissions`。
+- `hasRunningSubagents`：是否有后台子代理在跑。有则本轮结束后不开新轮，记为 `blocked / waiting_subagents`。L4 的前台子代理在 `subagent` 工具调用内跑完，`agent_before_settle` 时不可能有子代理在跑，所以这个注入等 L6 的后台子代理才接。
 
-没有这两个注入时，goal 仍可工作：审批按普通回合的行为阻塞等待；子 agent 视为不存在。
+没有这两个注入时，goal 仍可工作：审批按普通回合的行为阻塞等待；后台子代理视为不存在。
+
+L4（PR #21578）对 goal 的其余影响：子代理的用量计入预算（6.1），`subagent` 算有进展的工具（7.2），子代理的 session 里 goal 不生效（8.4）。
 
 ## 4. 架构
 
@@ -103,8 +105,8 @@ interface GoalSnapshot {
   progressRounds: number     // 有进展的轮数（见 6.1）；无核验端口时 complete 的退化检查读它
   maxGoalRounds: number      // 本 goal 的轮数上限
   budget?: { tokens?: number; usd?: number }   // 本 goal 的预算，任一项越过即触发
-  tokensUsed: number         // input + output + cacheRead + cacheWrite 之和
-  costUsed: number           // Pi 的 usage.cost.total 累计（L1 已把模型定价传给 Pi）；无定价的模型恒为 0
+  tokensUsed: number         // input + output + cacheRead + cacheWrite 之和，加上工具结果自带的 usage（见 6.1）
+  costUsed: number           // Pi 的 usage.cost.total 累计（L1 已把模型定价传给 Pi），同样加上工具结果的；无定价的模型恒为 0
   wrapUpDone: boolean        // 收尾轮是否已经跑过
   lastStop?: { code: GoalStopCode; message?: string; at: number }
   createdAt: number
@@ -130,7 +132,7 @@ type GoalStopCode =
   | 'approval_denied'        // 自主轮里审批被拒
   | 'awaiting_approval'      // 无人值守下出现审批请求
   | 'needs_user_input'       // 自主轮里用户关掉了提问
-  | 'waiting_children'       // 有后台子 agent 在跑（L4）
+  | 'waiting_subagents'      // 有后台子代理在跑（L6 接入 hasRunningSubagents 后才会出现）
   | 'provider_error'         // 模型请求失败
   | 'aborted'                // 用户中止了回合
   | 'paused_by_user'         // /goal pause
@@ -214,9 +216,12 @@ Summarize what is done, what is verified, and what remains, then stop.
 
 - `progress`：本轮是否有成功的非只读工具调用（`toolResults` 里存在 `isError !== true` 且工具不在集合 `read / grep / find / ls / tool_search / vcc_recall / get_goal / todo_write / AskUserQuestion` 中的结果），或 assistant 文本与上一轮归一化后不同。`todo_write` 和 `AskUserQuestion` 不算进展，否则只改 todo 或只提问的轮会绕过无进展检测。
 - `tokensUsed += usage.input + usage.output + usage.cacheRead + usage.cacheWrite`；`costUsed += usage.cost.total`（L1 在 `toPiUsage` 里用模型的 `cost` 单价算出，无定价时为 0）。
+- 工具自带的用量：`event.toolResults` 里每个带 `usage` 的结果再加 `tokensUsed += usage.totalTokens`、`costUsed += usage.cost.total`。不认工具名：目前只有 `subagent` 带 usage（L4 把子代理各次回复的用量之和放在 `AgentToolResult.usage` 上，Pi 把它带到 toolResult 消息和 `turn_end` 的 `toolResults`），以后别的工具带上 usage 也会被计入。宿主已为子代理的每次请求记过账，这里只计入 goal 预算，不重复计费。
 - `truncated`：assistant `stopReason === 'length'`。
 
 ### 6.2 `agent_before_settle`：按顺序判断
+
+子代理的 session 里本节不适用：`agent_before_settle` 直接不续跑（8.4）。
 
 ```
 1. outcome === 'aborted'                       → phase=paused, code=aborted；不续跑
@@ -229,7 +234,7 @@ Summarize what is done, what is verified, and what remains, then stop.
                                                → phase=paused, code=paused_each_round, armed=false；不续跑
 7. context.pendingMessages 非空                  → 不续跑（用户消息优先；goal 保持 active 和 armed，
                                                  下一次 before_settle 再判）
-8. port.hasRunningChildren?.() === true         → phase=blocked, code=waiting_children；不续跑
+8. port.hasRunningSubagents?.() === true        → phase=blocked, code=waiting_subagents；不续跑
 9. 无进展计数 ≥ 3                               → phase=blocked, code=no_progress；不续跑
 10. 预算判断：
     wrapUpDone                                 → phase=blocked, code=round_limit（轮数已到上限）
@@ -281,6 +286,7 @@ Pi 的处理器按加载顺序串行组合，后加载的扩展可以覆盖 `ent
 - 轮级：连续两轮 `progress === false` → 下一轮 `kind = hint`；连续三轮 → `blocked / no_progress`。任何一轮有进展即清零。
 - 轮内（`tool_call` 事件）：对 `toolName + JSON.stringify(input)` 取哈希；同一哈希连续出现第 3 次时，返回 `{ block: true, reason: '同样的调用已经执行过，结果不会变化；换一种方式或报告阻碍。' }`；第 5 次时记入停止请求，`agent_before_settle` 以 `no_progress` 停下。计数在每轮开始时清零。
 - `truncated` 的轮不算有进展，也不单独停（DSH 在 max tokens 时直接停；V1 交给无进展计数处理，因为截断本身不说明没有进展）。
+- `subagent` 算有进展的工具（它不在 6.1 的只读集合 `NON_PROGRESS_TOOLS` 里）：一次没有出错的子代理调用就让本轮有进展。子代理内部的工具调用在它自己的 session 里，不进父 session 的 `toolResults` 和 `tool_call` 事件，不影响父 goal 的两级判定。
 
 ### 7.3 需要人
 
@@ -294,7 +300,7 @@ Pi 的处理器按加载顺序串行组合，后加载的扩展可以覆盖 `ent
 
 这需要 L3 的 `AskUserQuestionDetails` 增加 `outcome: 'answered' | 'declined' | 'unavailable' | 'aborted'`；现在 declined 和 unavailable 的 `details` 形状相同，无法区分。这是对 L3 的一个小改动，随 goal 实现一起提交。
 
-两条规则：审批被拒不计入 7.5 的 blocked 门槛（它不是模型报的阻碍）；goal 不改变任何审批策略。用户选择 `default` 模式时，goal 会在每个需要审批的工具前停下等待，这是用户的选择，启动 goal 时 UI 提示一句即可。
+两条规则：审批被拒不计入 7.5 的 blocked 门槛（它不是模型报的阻碍）；goal 不改变任何审批策略。用户选择 manual 模式（存储值 `default`）时，goal 会在每个需要审批的工具前停下等待，这是用户的选择，启动 goal 时 UI 提示一句即可。
 
 ### 7.4 错误
 
@@ -361,6 +367,19 @@ update_goal(goal_id, revision, action, objective?, max_goal_rounds?, budget_toke
 
 `createGoalExtension` 接收 `port.modelSupportsTools(): boolean`。为 `false` 时不注册工具和命令；若 branch 上已有 `active` 目标，在 `session_start` 追加一条快照 `phase = 'blocked'`、`lastStop.code = 'unsupported_model'`，让 UI 解释为什么没有续跑。用户换回支持工具的模型后 `resume` 即可继续。
 
+### 8.4 子代理里不生效
+
+goal 属于主代理。fork 子代理从父 transcript 起步，继承了父 session 的 `cherry.goal` 条目；宿主又必须给 fork 返回父 session 的扩展（L4 README "Subagents"），所以 goal 扩展在 fork 里也会加载。不处理的话，fork 会以为自己身上有一个活跃目标：它的任务是一条用户消息，`isHumanTurn` 为真，模型一调 `update_goal(resume)` 就会武装，并在 fork 里不停续跑。
+
+所以在 `isSubagentSession(ctx.sessionManager.getBranch())` 为真的 session 里（L4 的包内函数，在 `src/subagent.ts`，看 branch 上有没有 `cherry.subagent-origin` 条目）：
+
+- `session_start` 忽略继承来的 goal 状态：当前目标为空（`runtime.goal` 保持 `undefined`），不追加任何快照。
+- 三个 goal 工具都抛 `GoalError('in_subagent')`，告诉模型目标归主代理管，照常完成交给它的任务。`GoalErrorCode` 为此新增 `in_subagent`：现有的码都说的是目标本身的问题，没有一个表示"这个 session 不该碰目标"。
+- `agent_before_settle` 不续跑。
+- `/goal` 命令在子代理里不可达（子代理的输入是 `subagent` 工具拼出的任务文本，不以 `/` 开头），不另设门控。
+
+fork 照样注册三个 goal 工具，工具列表与父 session 一致，前缀缓存不受影响。全新上下文的子代理若被宿主配上 goal 扩展，同样适用这些规则。
+
 ## 9. 完成核验
 
 ```ts
@@ -395,8 +414,8 @@ interface GoalPort {
   onApproval?(listener: (event: {
     kind: 'pending' | 'granted' | 'denied' | 'unavailable'
     toolCallId: string
-  }) => void): () => void                              // L4 注入
-  hasRunningChildren?(): boolean                        // L4 注入
+  }) => void): () => void                              // 宿主接入 PR 注入（来自 ToolApprovalRegistry）
+  hasRunningSubagents?(): boolean                       // L6 注入（后台子代理）
   verify?: GoalVerifier                                 // 二期注入
 }
 ```
@@ -406,7 +425,8 @@ interface GoalPort {
 - 把 `cherry.goal` 状态条目和 `cherry.goal-round` 消息映射到 UI：状态指示（phase、`lastStop.message`、轮数、token）、消息头的"第 N 轮"。
 - 三个操作：停本轮 → `session.abort()`；暂停 → `/goal pause`；清除 → `/goal clear`。
 - `create_goal` 的审批策略设为"询问"。
-- 启动 goal 时若审批模式为 `default`，提示"每个需要审批的工具都会停下等你"。
+- 启动 goal 时若权限模式为 manual（存储值 `default`），提示"每个需要审批的工具都会停下等你"。
+- plan 模式下不开自主续跑轮（见 1.1，属于接入 / 权限 PR）。
 - 遥测：每次出现新的 `lastStop`（以 `lastStop.at` 区分）记一次事件（code、roundsStarted、tokensUsed、时长）；用户在 `complete` 之后的同一会话里继续发消息并再次创建或恢复目标，记为"用户推翻完成"。
 
 ## 11. 与 L2 的衔接
@@ -442,6 +462,9 @@ interface GoalPort {
 | 用户消息在 `pendingMessages` 里 → 本次不续跑，处理后再续 | 抢先于用户消息，或让路后忘记目标 |
 | 第 N 轮为 wrap-up，之后 `blocked / round_limit`；`edit` 调高后 `resume` 可继续 | 少跑或多跑一轮；触顶后无路可走 |
 | token 或金额预算越过后一轮 wrap-up，之后 `blocked / budget_exhausted`；无定价模型只按 token 计 | 不计 token、不计 cost，或不收尾 |
+| goal 轮里一次 `subagent` 调用的结果 `usage` 计入 `tokensUsed` / `costUsed`，越过预算后收尾 | 只计 assistant 消息的 usage |
+| `hasRunningSubagents()` 为真 → 本轮结束 `blocked / waiting_subagents`，不开新轮 | 检查缺失 |
+| 父 goal 活跃时在 goal 轮里开的 fork 子代理：goal 工具报 `in_subagent`，`update_goal(resume)` 之后也不续跑 | fork 把继承来的 goal 当成自己的 |
 | 连续两轮无进展 → 第三轮带 hint；三轮 → `no_progress` | 计数不清零或不提示 |
 | 同一工具调用第 3 次被 block 并提示，第 5 次后本轮结束即停 | 轮内检测缺失 |
 | 审批被拒 → 本轮结束 `approval_denied`，不计入 blocked 门槛 | 拒绝被当作"再试一次" |
@@ -462,8 +485,8 @@ interface GoalPort {
 1. 默认 `maxGoalRounds = 100`、绝对上限 1000。一轮按"模型停下后推一次"计，V1 已有无进展检测和预算兜底，上限只封顶"有用但没完没了"的工作。
 2. 预算支持 token 数和金额两种，默认不设；金额依赖 L1 已传给 Pi 的模型定价，无定价的模型只能用 token。
 3. 模型创建目标的确认用审批策略"询问"，包内无代码。
-4. `GoalPort.onApproval` 和 `hasRunningChildren` 的形状现在就定（第 10 节）；只有宿主侧适配等 L4 的权限统一（#19591）和子 agent 生命周期落地，不影响包内实现。
+4. `GoalPort.onApproval` 和 `hasRunningSubagents` 的形状现在就定（第 10 节），二者都不影响包内实现：`onApproval` 由宿主接入 PR 接到 `ToolApprovalRegistry`，权限模式按 Claude Code 的五档 auto（默认）/ manual / edit / plan / full（存储值 `auto / default / acceptEdits / plan / bypassPermissions`）；`hasRunningSubagents` 等 L6 的后台子代理再接。
 
 ## 15. 实施顺序
 
-L4 执行环境完成后开始。包内工作可以按 13 节的测试顺序推进；宿主接入（UI、命令入口、审批策略、遥测）在接入 PR 里做。
+L4（前台子代理，PR #21578）已完成，L5 基于它实现：任务 1–4 已实现，分支已 rebase 到 L4 上。其余包内工作按 13 节的测试顺序推进；宿主接入（UI、命令入口、审批策略与权限模式、plan 模式下不续跑、遥测）在接入 PR 里做；`hasRunningSubagents` 等 L6。
