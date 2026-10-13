@@ -263,7 +263,7 @@ Pi 的处理器按加载顺序串行组合，后加载的扩展可以覆盖 `ent
 - 接纳的时机分两种（已用探针确认 Pi 1.1 的事件顺序）：
   - `/goal <objective>`、`/goal resume` 用 `pi.sendMessage(..., { triggerTurn: true })` 开的轮：本扩展 `cherry.goal-round` 消息的 `message_end`（Pi 先发 `turn_start`，再在这条消息的 `message_end` 之后把它写进 branch）。
   - 在 `agent_before_settle` 返回 `{ entries, continue: true }` 续跑的轮：Pi 在 `agent_start` / `turn_start` 之前就把 round 消息写进 branch，而且扩展收不到它的 `message_end`；所以在下一个 `turn_start` 找 branch 上最后一条 message 条目之后的 round 消息（其他扩展在同一次边界里追加的条目可能排在它后面，跳过）。
-  两种情况下，`details` 与预约一致则追加快照 `roundsStarted + 1`（wrap-up 轮同时置 `wrapUpDone = true`），清空预约。`edit` 调高 `maxGoalRounds` 或 `budget` 时把 `wrapUpDone` 重置为 `false`，触顶后的目标才能再次续跑。
+  两种情况下，`details` 与预约一致则追加快照 `roundsStarted + 1`（wrap-up 轮同时置 `wrapUpDone = true`），清空预约。`edit` 调高 `maxGoalRounds` 或 `budget`、且调高后有余量时，把 `wrapUpDone` 重置为 `false`，触顶后的目标才能再次续跑。
 - 若先到的是 `agent_settled`：预约作废，追加快照 `phase = 'blocked'`、`lastStop = continuation_rejected`（与 5.2 一致），`armed = false`。宿主据此在 UI 上提示"续跑被拒绝"。
 
 这和 DSH 的"只有被接纳的 goal 消息才推进轮数"一致。
@@ -348,7 +348,7 @@ update_goal(goal_id, revision, action, objective?, max_goal_rounds?, budget_toke
 | `complete`、`blocked` | 人类回合或 goal 轮都可以 |
 | `create` | 当前没有目标，或当前目标已 `complete` |
 | `resume` | phase 为 `paused` 或 `blocked`，且有余量（轮数和预算都未触顶）；`active` 但 disarmed 时只重新武装；`active` 且已武装时什么都不改（不追加快照）；`complete` 的目标拒绝 |
-| `edit` | 可改 objective、`max_goal_rounds`、`budget_tokens`、`budget_usd`；调高上限时重置 `wrapUpDone`，并把 `round_limit` / `budget_exhausted` 导致的 `blocked` 恢复为 `active`（仍需 `resume` 才武装）；不带任何字段的 `edit` 是 `invalid_action`，什么都不改 |
+| `edit` | 可改 objective、`max_goal_rounds`、`budget_tokens`、`budget_usd`；调高上限且调高后两个限额都有余量时，才重置 `wrapUpDone`，并把 `round_limit` / `budget_exhausted` 导致的 `blocked` 恢复为 `active`（仍需 `resume` 才武装）；只调高其中一个、另一个仍越过时什么都不重开，否则会多跑一轮 wrap-up；不带任何字段的 `edit` 是 `invalid_action`，什么都不改 |
 | `pause` | `paused` 的目标上什么都不改（不追加快照）；`complete` 的目标拒绝 |
 | 所有变更 | `goal_id` 和 `revision` 与当前一致，否则返回 stale 错误并附当前视图 |
 
