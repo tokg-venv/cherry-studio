@@ -24,7 +24,6 @@ export {
   GOAL_STATE_TYPE,
   type GoalBudget,
   type GoalCleared,
-  type GoalLimits,
   type GoalNotice,
   type GoalPhase,
   type GoalSnapshot,
