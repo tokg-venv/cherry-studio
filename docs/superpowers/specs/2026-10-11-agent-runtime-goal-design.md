@@ -81,10 +81,10 @@ packages/agent-runtime/tests/goal*.test.ts
 | 事件 | 用途 |
 |---|---|
 | `session_start` | 从 branch 上最后一条 `cherry.goal` 状态条目恢复目标；`armed = false` |
-| `tool_call` | 轮内重复工具调用的检测（见 7.4） |
+| `tool_call` | 轮内重复工具调用的检测（见 7.2） |
 | `turn_end` | 记账：本轮是否有进展、累计 token、是否有待处理的停止请求 |
 | `agent_before_settle` | 唯一的续跑决策点（见 6） |
-| `turn_start` | 确认上一次续跑是否被接纳（见 6.3） |
+| `message_end` | 本扩展 `cherry.goal-round` 消息的 `message_end`：确认续跑被接纳（见 6.3）；用户消息的 `message_end`：标记人类回合开始（见 6.1） |
 | `agent_settled` | 清理未被接纳的预约；不做任何续跑 |
 
 宿主侧没有新的 IPC 或 DataApi：goal 的全部状态通过 L2 的 `cherry.goal` 状态条目进入 transcript，宿主按已有的 `transcript-append` 事件存储和渲染。
@@ -212,9 +212,11 @@ Summarize what is done, what is verified, and what remains, then stop.
 
 ### 6.1 `turn_end`：记账
 
+只记 goal 轮里的 turn：从轮被接纳（6.3）起，到下一个人类回合开始或本次运行结束为止。人类回合开始时（用户消息的 `message_end`；Pi 在 `turn_start` 之后才把消息写进 branch，所以不能在 `turn_start` 读 branch 判断）清零无进展计数和 blocked 计数（7.2、7.5），这个回合的用量和工具调用不计入 goal。
+
 每个 turn 结束时记录（只在内存里，随快照持久化的只有累计 token）：
 
-- `progress`：本轮是否有成功的非只读工具调用（`toolResults` 里存在 `isError !== true` 且工具不在集合 `read / grep / find / ls / tool_search / vcc_recall / get_goal / todo_write / AskUserQuestion` 中的结果），或 assistant 文本与上一轮归一化后不同。`todo_write` 和 `AskUserQuestion` 不算进展，否则只改 todo 或只提问的轮会绕过无进展检测。
+- `progress`：按轮计，一轮里任一 turn 满足即算有进展：有成功的非只读工具调用（`toolResults` 里存在 `isError !== true` 且工具不在集合 `read / grep / find / ls / tool_search / vcc_recall / get_goal / todo_write / AskUserQuestion` 中的结果），或这一轮最后一条带文字的 assistant 回复与上一轮的归一化后不同。只调工具、没有文字的 turn 不更新"上一轮的文字"。`todo_write` 和 `AskUserQuestion` 不算进展，否则只改 todo 或只提问的轮会绕过无进展检测。
 - `tokensUsed += usage.input + usage.output + usage.cacheRead + usage.cacheWrite`；`costUsed += usage.cost.total`（L1 在 `toPiUsage` 里用模型的 `cost` 单价算出，无定价时为 0）。
 - 工具自带的用量：`event.toolResults` 里每个带 `usage` 的结果再加 `tokensUsed += usage.totalTokens`、`costUsed += usage.cost.total`。不认工具名：目前只有 `subagent` 带 usage（L4 把子代理各次回复的用量之和放在 `AgentToolResult.usage` 上，Pi 把它带到 toolResult 消息和 `turn_end` 的 `toolResults`），以后别的工具带上 usage 也会被计入。宿主已为子代理的每次请求记过账，这里只计入 goal 预算，不重复计费。
 - `truncated`：assistant `stopReason === 'length'`。
@@ -256,7 +258,7 @@ Summarize what is done, what is verified, and what remains, then stop.
 
 Pi 的处理器按加载顺序串行组合，后加载的扩展可以覆盖 `entries` 和 `continue`，提出方不会收到回执。所以 `roundsStarted` 不在返回 `continue: true` 时递增，而在确认被接纳时递增：
 
-- 下一个 `turn_start`：检查 `ctx.sessionManager.getBranch()` 末尾是否是本扩展的 `cherry.goal-round` 条目，且 `details` 与预约一致。一致则追加快照 `roundsStarted + 1`（wrap-up 轮同时置 `wrapUpDone = true`），清空预约。`edit` 调高 `maxGoalRounds` 或 `budget` 时把 `wrapUpDone` 重置为 `false`，触顶后的目标才能再次续跑。
+- 本扩展 `cherry.goal-round` 消息的 `message_end`（Pi 在这条消息的 `message_end` 时把它写进 branch，早于这一轮的模型请求；`turn_start` 先于它到达，那时 branch 上还没有这条消息）：`details` 与预约一致则追加快照 `roundsStarted + 1`（wrap-up 轮同时置 `wrapUpDone = true`），清空预约。`edit` 调高 `maxGoalRounds` 或 `budget` 时把 `wrapUpDone` 重置为 `false`，触顶后的目标才能再次续跑。
 - 若先到的是 `agent_settled`：预约作废，追加快照 `phase = 'blocked'`、`lastStop = continuation_rejected`（与 5.2 一致），`armed = false`。宿主据此在 UI 上提示"续跑被拒绝"。
 
 这和 DSH 的"只有被接纳的 goal 消息才推进轮数"一致。
@@ -284,7 +286,7 @@ Pi 的处理器按加载顺序串行组合，后加载的扩展可以覆盖 `ent
 ### 7.2 无进展
 
 - 轮级：连续两轮 `progress === false` → 下一轮 `kind = hint`；连续三轮 → `blocked / no_progress`。任何一轮有进展即清零。
-- 轮内（`tool_call` 事件）：对 `toolName + JSON.stringify(input)` 取哈希；同一哈希连续出现第 3 次时，返回 `{ block: true, reason: '同样的调用已经执行过，结果不会变化；换一种方式或报告阻碍。' }`；第 5 次时记入停止请求，`agent_before_settle` 以 `no_progress` 停下。计数在每轮开始时清零。
+- 轮内（`tool_call` 事件）：对 `toolName + JSON.stringify(input)` 取哈希；同一哈希连续出现第 3 次时，返回 `{ block: true, reason: '同样的调用已经执行过，结果不会变化；换一种方式或报告阻碍。' }`；第 5 次时记入停止请求，`agent_before_settle` 以 `no_progress` 停下。计数在轮被接纳时（6.3）清零，不在每个 turn 清零。
 - `truncated` 的轮不算有进展，也不单独停（DSH 在 max tokens 时直接停；V1 交给无进展计数处理，因为截断本身不说明没有进展）。
 - `subagent` 算有进展的工具（它不在 6.1 的只读集合 `NON_PROGRESS_TOOLS` 里）：一次没有出错的子代理调用就让本轮有进展。子代理内部的工具调用在它自己的 session 里，不进父 session 的 `toolResults` 和 `tool_call` 事件，不影响父 goal 的两级判定。
 
@@ -309,7 +311,7 @@ Pi 的处理器按加载顺序串行组合，后加载的扩展可以覆盖 `ent
 ### 7.5 模型自报
 
 - `complete`：先过核验（第 9 节）；通过则 `complete / complete`，本轮结束后不续跑，模型收到一段收尾指令。不通过则工具返回错误结果，说明缺什么，goal 继续。
-- `blocked`：需要 `blocked_reason`，且同一 revision 下连续 `blockedAfter`（默认 3）轮都尝试过报 blocked。不足时返回错误结果："继续尝试；若第 N 轮仍是同一条件再报告"。计数在人类回合或 revision 变化时清零。满足后 `blocked / model_blocked`。
+- `blocked`：需要 `blocked_reason`。人类回合里直接接受（人在场，随时可以 `resume`）。goal 轮里需要连续 `blockedAfter`（默认 3）轮都报过 blocked；不足时返回错误结果："继续尝试；若第 N 轮仍是同一条件再报告"。计数在人类回合开始、用户编辑目标（objective 或上限变化）时清零；不按 revision 清零，因为每轮被接纳都会让 revision +1（5.1）。满足后 `blocked / model_blocked`。
 
 ### 7.6 停止压过续跑
 
