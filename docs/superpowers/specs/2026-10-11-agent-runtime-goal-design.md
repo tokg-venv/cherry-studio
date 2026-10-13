@@ -1,6 +1,6 @@
 # Agent runtime goal 设计
 
-状态：实施中（任务 1–4 已实现）· 2026-10-11，2026-10-13 按 L4 子代理修订 · 基于 L4（PR #21578）
+状态：已实现（任务 1–11）· 2026-10-11，2026-10-13 按 L4 子代理修订、按全分支评审修订 · 基于 L4（PR #21578）
 
 ## 1. 背景与目标
 
@@ -48,7 +48,7 @@ Cherry 正把 Pi 做成唯一的 agent runtime（L1 #21436 桥接、L2 #21437 tr
 9. 自主等级：`auto`（空闲即续）和 `confirm-each-round`（每轮结束停下等用户）。
 10. 模型创建目标需用户确认（通过宿主的审批策略实现，包内无代码）。
 11. 完成核验端口 `GoalVerifier`；宿主未实现时退化为运行时检查。
-12. 每次停止都写入原因码和统计（轮数、token、时长）。
+12. 每次停止都写入原因码和统计（轮数、token、时长）。统计截至停止那一刻：同一轮里停止之后的请求（例如 `complete` 之后的总结）不在这条快照里。
 
 ### 3.2 二期（质量）
 
@@ -227,7 +227,9 @@ Summarize what is done, what is verified, and what remains, then stop.
 子代理的 session 里本节不适用：`agent_before_settle` 直接不续跑（8.4）。
 
 ```
-1. （中止不走这里：Pi 中止后跳过 agent_before_settle，见 7.6）
+1. outcome === 'aborted'（宿主经自己的 signal 中止了请求；session.abort() 不走这里，Pi 跳过 agent_before_settle）
+                                               → 不结算这一轮；目标 active 且已武装时 phase=paused, code=aborted；
+                                                 不续跑（见 7.6）
 2. outcome === 'error'，且目标 active 并已武装  → phase=blocked, code=provider_error；不续跑
    （未武装的目标没有在跑，无关的人类回合出错不改它）
 3. 没有当前目标，或 phase !== 'active'           → 不续跑
@@ -236,8 +238,9 @@ Summarize what is done, what is verified, and what remains, then stop.
 5. !armed                                      → 不续跑（新 session、resume 之前）
 6. 本次运行里跑过 goal 轮（自上次武装以来有轮被接纳），且 autonomy() === 'confirm-each-round'
                                                → phase=paused, code=paused_each_round, armed=false；不续跑
-7. context.pendingMessages 非空                  → 不续跑（用户消息优先；goal 保持 active 和 armed，
-                                                 下一次 before_settle 再判）
+7. context.pendingMessages 里有用户消息          → 不续跑（用户消息优先；goal 保持 active 和 armed，
+                                                 下一次 before_settle 再判。只有扩展发的、不触发回合的
+                                                 custom 消息时不让路：Pi 不会因它续跑）
 8. port.hasRunningSubagents?.() === true        → phase=blocked, code=waiting_subagents；不续跑
 9. 无进展计数 ≥ 3                               → phase=blocked, code=no_progress；不续跑
 10. 预算判断：
@@ -247,7 +250,8 @@ Summarize what is done, what is verified, and what remains, then stop.
       或 tokensUsed ≥ budget.tokens
       或 costUsed ≥ budget.usd                  → 预约一轮 kind=wrap-up（这一轮计入轮数）
     否则                                       → 预约一轮 kind=work（无进展计数 == 2 时 kind=hint）
-11. 预约：entries=[轮消息]，continue=true；记录 reservation={revision, round: roundsStarted+1}
+11. 预约：entries=[先加载扩展在同一边界提议的条目…, 轮消息]（Pi 只保留最后一个处理器返回的 entries），
+    continue=true；记录 reservation={revision, round: roundsStarted+1}
 ```
 
 第 10 条的效果：轮数上限为 N 时，第 N 轮就是收尾轮，不多跑；预算越过后多跑一轮收尾，然后停。`confirm-each-round` 模式下 `/goal resume` 只重新武装一次，第 6 条保证它恰好跑一轮。
@@ -311,7 +315,7 @@ Pi 的处理器按加载顺序串行组合，后加载的扩展可以覆盖 `ent
 
 ### 7.4 错误
 
-`outcome === 'error'` 一律 `blocked / provider_error`，`lastStop.message` 取 assistant 的 `errorMessage`。goal 层不重试：L1 已把重试放在 AI SDK 层，到达这里的错误是重试耗尽后的。用量受限（429）与其他错误的区分留给以后的错误分级（宿主接入层或单独一层，L4 现在是子代理）；V1 的 UI 只展示原文。
+`outcome === 'error'` 一律 `blocked / provider_error`，`lastStop.message` 取 branch 上最后一条 message 条目（失败的 assistant 回复；其他扩展之后追加的条目跳过）的 `errorMessage`。goal 层不重试：L1 已把重试放在 AI SDK 层，到达这里的错误是重试耗尽后的。用量受限（429）与其他错误的区分留给以后的错误分级（宿主接入层或单独一层，L4 现在是子代理）；V1 的 UI 只展示原文。
 
 ### 7.5 模型自报
 
@@ -321,7 +325,8 @@ Pi 的处理器按加载顺序串行组合，后加载的扩展可以覆盖 `ent
 ### 7.6 停止压过续跑
 
 - 中止（宿主 `session.abort()`，或命令里的 `ctx.abort()`）：Pi 跳过 `agent_before_settle`，只在 `agent_settled` 报 `aborted: true`；goal 若是 active 且已武装，在 `agent_settled` 里变 `paused / aborted`（未武装的 goal 不受影响，见 6.4）。中止后 Pi 不会再续跑，所以不会排在续跑后面。
-- `/goal pause`、`/goal clear`：Pi 对扩展命令"立即处理，即使正在流式输出"。命令处理器先写快照（phase=paused 或墓碑），再在 goal 原为 `active` 且 agent 正忙时调用 `ctx.abort()` 中止当前轮。Pi 随后跳过 `agent_before_settle`；`agent_settled` 到来时 goal 已不是 `active`，不会再被记成 `aborted`。
+- 宿主经自己的 signal 中止请求（L1 桥支持）：Pi 不知道这次中止，运行以 `outcome: 'aborted'` 到达 `agent_before_settle`，`agent_settled` 报 `aborted: false`。goal 在 settle 里同样记 `paused / aborted`（仅限 active 且已武装），不结算这一轮，不续跑（6.2 第 1 条）。
+- `/goal pause`、`/goal clear`：Pi 对扩展命令"立即处理，即使正在流式输出"。命令处理器先写快照（phase=paused 或墓碑），再在 goal 原为 `active` 且已武装、agent 正忙时调用 `ctx.abort()` 中止当前轮（未武装的 goal 没有在跑，正在进行的是用户自己的回合，不中止）。Pi 随后跳过 `agent_before_settle`；`agent_settled` 到来时 goal 已不是 `active`，不会再被记成 `aborted`。
 - 三个操作在 UI 上分开：停本轮（中止）、暂停目标、清除目标。
 
 ## 8. 工具与命令
@@ -363,9 +368,9 @@ update_goal(goal_id, revision, action, objective?, max_goal_rounds?, budget_toke
 | `/goal` | 返回状态文本：objective、phase（附最近一次停止）、activation、轮数 `roundsStarted/maxGoalRounds`、token（金额非零时附上） |
 | `/goal <objective>` | 创建并武装；已有未完成目标时报错，提示先 clear 或 edit |
 | `/goal edit <objective>` | 改 objective，phase 和 activation 不变；`edit` 后为空时按其余子命令处理（没有目标就回答没有目标），不把 "edit" 当成 objective |
-| `/goal pause` | phase=paused；仅当 goal 原为 `active` 且 agent 正忙时中止当前轮 |
+| `/goal pause` | phase=paused；仅当 goal 原为 `active` 且已武装、agent 正忙时中止当前轮 |
 | `/goal resume` | 重新武装；`confirm-each-round` 模式下只跑一轮；无余量时报错 |
-| `/goal clear` | 写墓碑；仅当 goal 原为 `active` 且 agent 正忙时中止当前轮 |
+| `/goal clear` | 写墓碑；仅当 goal 原为 `active` 且已武装、agent 正忙时中止当前轮 |
 | `/goal rounds <n>` / `/goal budget <tokens>` / `/goal budget $<usd>` | 调上限或预算（轮数受绝对上限约束）；仅当 `rounds` / `budget` 后恰好跟一个数字时才是子命令，否则整条输入都是 objective |
 
 控制词只在占满整个输入时生效；`rounds` / `budget` 仅在后面恰好跟一个数字时是子命令（`budget` 也接受 `$<数字>`），否则整条输入都是 objective；控制词和子命令词大小写不敏感；其余非空输入都是 objective。命令的反馈文本写成 `cherry.goal-notice` 状态条目（`{ text, level: 'info' | 'error' }`），由 L2 作为 `state` 条目送到宿主，宿主作为一次性提示展示；它不进入模型上下文，宿主不必持久化它；若持久化，重建时回放无害。
@@ -496,4 +501,4 @@ interface GoalPort {
 
 ## 15. 实施顺序
 
-L4（前台子代理，PR #21578）已完成，L5 基于它实现：任务 1–4 已实现，分支已 rebase 到 L4 上。其余包内工作按 13 节的测试顺序推进；宿主接入（UI、命令入口、审批策略与权限模式、plan 模式下不续跑、遥测）在接入 PR 里做；`hasRunningSubagents` 等 L6。
+L4（前台子代理，PR #21578）已完成，L5 基于它实现：包内任务 1–11 已全部实现，分支已 rebase 到 L4 上。宿主接入（UI、命令入口、审批策略与权限模式、plan 模式下不续跑、遥测）在接入 PR 里做；`hasRunningSubagents` 等 L6。
