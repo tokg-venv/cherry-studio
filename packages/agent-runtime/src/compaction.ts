@@ -4,6 +4,8 @@ import { type ConversationModelMessage, toModelMessages } from './modelMessages'
 import type { CompactionReason } from './transcriptTap'
 
 export interface CompactionSummaryRequest {
+  /** The compacting session's Pi session id; for a subagent, the id `SubagentPort.configure` received. */
+  sessionId: string
   reason: CompactionReason
   /**
    * The messages being folded, as the session model saw them: failed replies are left out and tool
@@ -44,6 +46,7 @@ export function compactionSummaryExtension(
       const { preparation, signal } = event
       try {
         const summary = await summarize({
+          sessionId: ctx.sessionManager.getSessionId(),
           reason: event.reason,
           messages: toModelMessages(
             convertToLlm([...preparation.messagesToSummarize, ...preparation.turnPrefixMessages]),
