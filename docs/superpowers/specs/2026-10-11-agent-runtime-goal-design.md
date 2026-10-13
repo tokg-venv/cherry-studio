@@ -84,7 +84,7 @@ packages/agent-runtime/tests/goal*.test.ts
 | `tool_call` | 轮内重复工具调用的检测（见 7.2） |
 | `turn_end` | 记账：本轮是否有进展、累计 token、是否有待处理的停止请求 |
 | `agent_before_settle` | 唯一的续跑决策点（见 6） |
-| `message_end` | 本扩展 `cherry.goal-round` 消息的 `message_end`：确认续跑被接纳（见 6.3）；用户消息的 `message_end`：标记人类回合开始（见 6.1） |
+| `turn_start` / `message_end` | 确认续跑被接纳（见 6.3：命令开的轮看 round 消息的 `message_end`，在 `agent_before_settle` 续跑的轮看下一个 `turn_start` 时 branch 末尾的 round 消息）；用户消息的 `message_end`：标记人类回合开始（见 6.1） |
 | `agent_settled` | 清理未被接纳的预约；不做任何续跑 |
 
 宿主侧没有新的 IPC 或 DataApi：goal 的全部状态通过 L2 的 `cherry.goal` 状态条目进入 transcript，宿主按已有的 `transcript-append` 事件存储和渲染。
@@ -226,7 +226,7 @@ Summarize what is done, what is verified, and what remains, then stop.
 子代理的 session 里本节不适用：`agent_before_settle` 直接不续跑（8.4）。
 
 ```
-1. outcome === 'aborted'                       → phase=paused, code=aborted；不续跑
+1. （中止不走这里：Pi 中止后跳过 agent_before_settle，见 7.6）
 2. outcome === 'error'                         → phase=blocked, code=provider_error；不续跑
 3. 没有当前目标，或 phase !== 'active'           → 不续跑
 4. 有停止请求（见 7.3：审批被拒 / 提问被关 / 无人值守审批）
@@ -258,7 +258,10 @@ Summarize what is done, what is verified, and what remains, then stop.
 
 Pi 的处理器按加载顺序串行组合，后加载的扩展可以覆盖 `entries` 和 `continue`，提出方不会收到回执。所以 `roundsStarted` 不在返回 `continue: true` 时递增，而在确认被接纳时递增：
 
-- 本扩展 `cherry.goal-round` 消息的 `message_end`（Pi 在这条消息的 `message_end` 时把它写进 branch，早于这一轮的模型请求；`turn_start` 先于它到达，那时 branch 上还没有这条消息）：`details` 与预约一致则追加快照 `roundsStarted + 1`（wrap-up 轮同时置 `wrapUpDone = true`），清空预约。`edit` 调高 `maxGoalRounds` 或 `budget` 时把 `wrapUpDone` 重置为 `false`，触顶后的目标才能再次续跑。
+- 接纳的时机分两种（已用探针确认 Pi 1.1 的事件顺序）：
+  - `/goal <objective>`、`/goal resume` 用 `pi.sendMessage(..., { triggerTurn: true })` 开的轮：本扩展 `cherry.goal-round` 消息的 `message_end`（Pi 先发 `turn_start`，再在这条消息的 `message_end` 之后把它写进 branch）。
+  - 在 `agent_before_settle` 返回 `{ entries, continue: true }` 续跑的轮：Pi 在 `agent_start` / `turn_start` 之前就把 round 消息写进 branch，而且扩展收不到它的 `message_end`；所以在下一个 `turn_start` 检查 branch 末尾是不是这条 round 消息。
+  两种情况下，`details` 与预约一致则追加快照 `roundsStarted + 1`（wrap-up 轮同时置 `wrapUpDone = true`），清空预约。`edit` 调高 `maxGoalRounds` 或 `budget` 时把 `wrapUpDone` 重置为 `false`，触顶后的目标才能再次续跑。
 - 若先到的是 `agent_settled`：预约作废，追加快照 `phase = 'blocked'`、`lastStop = continuation_rejected`（与 5.2 一致），`armed = false`。宿主据此在 UI 上提示"续跑被拒绝"。
 
 这和 DSH 的"只有被接纳的 goal 消息才推进轮数"一致。
@@ -315,7 +318,7 @@ Pi 的处理器按加载顺序串行组合，后加载的扩展可以覆盖 `ent
 
 ### 7.6 停止压过续跑
 
-- 中止（宿主 `session.abort()`）：Pi 给出 `outcome: 'aborted'`，6.2 第 1 条处理，goal 变 `paused / aborted`。中止在 Pi 内部优先于一切队列，不会排在续跑后面。
+- 中止（宿主 `session.abort()`，或命令里的 `ctx.abort()`）：Pi 跳过 `agent_before_settle`，只在 `agent_settled` 报 `aborted: true`；goal 在 `agent_settled` 里变 `paused / aborted`。中止后 Pi 不会再续跑，所以不会排在续跑后面。
 - `/goal pause`、`/goal clear`：Pi 对扩展命令"立即处理，即使正在流式输出"。命令处理器先写快照（phase=paused 或墓碑），再调用 `ctx.abort()` 中止当前轮。之后 `agent_before_settle` 看到的 phase 已不是 `active`。
 - 三个操作在 UI 上分开：停本轮（中止）、暂停目标、清除目标。
 
