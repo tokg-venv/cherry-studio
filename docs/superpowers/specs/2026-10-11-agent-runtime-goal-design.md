@@ -320,7 +320,7 @@ Pi 的处理器按加载顺序串行组合，后加载的扩展可以覆盖 `ent
 
 ### 7.6 停止压过续跑
 
-- 中止（宿主 `session.abort()`，或命令里的 `ctx.abort()`）：Pi 跳过 `agent_before_settle`，只在 `agent_settled` 报 `aborted: true`；goal 在 `agent_settled` 里变 `paused / aborted`。中止后 Pi 不会再续跑，所以不会排在续跑后面。
+- 中止（宿主 `session.abort()`，或命令里的 `ctx.abort()`）：Pi 跳过 `agent_before_settle`，只在 `agent_settled` 报 `aborted: true`；goal 若是 active 且已武装，在 `agent_settled` 里变 `paused / aborted`（未武装的 goal 不受影响，见 6.4）。中止后 Pi 不会再续跑，所以不会排在续跑后面。
 - `/goal pause`、`/goal clear`：Pi 对扩展命令"立即处理，即使正在流式输出"。命令处理器先写快照（phase=paused 或墓碑），再在 goal 原为 `active` 且 agent 正忙时调用 `ctx.abort()` 中止当前轮。Pi 随后跳过 `agent_before_settle`；`agent_settled` 到来时 goal 已不是 `active`，不会再被记成 `aborted`。
 - 三个操作在 UI 上分开：停本轮（中止）、暂停目标、清除目标。
 
