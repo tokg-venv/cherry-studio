@@ -76,16 +76,17 @@ packages/agent-runtime/src/goalState.ts          GoalSnapshot、原因码、状�
 packages/agent-runtime/tests/goal*.test.ts
 ```
 
-扩展通过 L3 已有的 `extensionFactories` 传入。它注册三个工具、一个 `/goal` 命令，并挂在四个 Pi 事件上：
+扩展通过 L3 已有的 `extensionFactories` 传入。它注册三个工具、一个 `/goal` 命令，并挂在下列 Pi 事件上：
 
 | 事件 | 用途 |
 |---|---|
-| `session_start` | 从 branch 上最后一条 `cherry.goal` 状态条目恢复目标；`armed = false` |
+| `session_start` | 从 branch 上最后一条 `cherry.goal` 状态条目恢复目标；`armed = false`；订阅 `port.onApproval`（见 7.3） |
+| `session_shutdown` | 退订 `port.onApproval` |
 | `tool_call` | 轮内重复工具调用的检测（见 7.2） |
 | `turn_end` | 记账：本轮是否有进展、累计 token、是否有待处理的停止请求 |
 | `agent_before_settle` | 唯一的续跑决策点（见 6） |
-| `turn_start` / `message_end` | 确认续跑被接纳（见 6.3：命令开的轮看 round 消息的 `message_end`，在 `agent_before_settle` 续跑的轮看下一个 `turn_start` 时 branch 末尾的 round 消息）；用户消息的 `message_end`：标记人类回合开始（见 6.1） |
-| `agent_settled` | 清理未被接纳的预约；不做任何续跑 |
+| `turn_start` / `message_end` | 确认续跑被接纳（见 6.3：命令开的轮看 round 消息的 `message_end`，在 `agent_before_settle` 续跑的轮看下一个 `turn_start` 时 branch 上最后一条 message 条目之后的 round 消息，其他扩展追加的条目跳过）；用户消息的 `message_end`：标记人类回合开始（见 6.1） |
+| `agent_settled` | 清理未被接纳的预约（记 `continuation_rejected`）；运行被中止时把 `active` 的目标记为 `paused / aborted`（见 7.6）；不做任何续跑 |
 
 宿主侧没有新的 IPC 或 DataApi：goal 的全部状态通过 L2 的 `cherry.goal` 状态条目进入 transcript，宿主按已有的 `transcript-append` 事件存储和渲染。
 
@@ -232,7 +233,7 @@ Summarize what is done, what is verified, and what remains, then stop.
 4. 有停止请求（见 7.3：审批被拒 / 提问被关 / 无人值守审批）
                                                → phase=blocked, code=对应原因；不续跑
 5. !armed                                      → 不续跑（新 session、resume 之前）
-6. 刚结束的是一个 goal 轮，且 autonomy() === 'confirm-each-round'
+6. 本次运行里跑过 goal 轮（自上次武装以来有轮被接纳），且 autonomy() === 'confirm-each-round'
                                                → phase=paused, code=paused_each_round, armed=false；不续跑
 7. context.pendingMessages 非空                  → 不续跑（用户消息优先；goal 保持 active 和 armed，
                                                  下一次 before_settle 再判）
@@ -260,7 +261,7 @@ Pi 的处理器按加载顺序串行组合，后加载的扩展可以覆盖 `ent
 
 - 接纳的时机分两种（已用探针确认 Pi 1.1 的事件顺序）：
   - `/goal <objective>`、`/goal resume` 用 `pi.sendMessage(..., { triggerTurn: true })` 开的轮：本扩展 `cherry.goal-round` 消息的 `message_end`（Pi 先发 `turn_start`，再在这条消息的 `message_end` 之后把它写进 branch）。
-  - 在 `agent_before_settle` 返回 `{ entries, continue: true }` 续跑的轮：Pi 在 `agent_start` / `turn_start` 之前就把 round 消息写进 branch，而且扩展收不到它的 `message_end`；所以在下一个 `turn_start` 检查 branch 末尾是不是这条 round 消息。
+  - 在 `agent_before_settle` 返回 `{ entries, continue: true }` 续跑的轮：Pi 在 `agent_start` / `turn_start` 之前就把 round 消息写进 branch，而且扩展收不到它的 `message_end`；所以在下一个 `turn_start` 找 branch 上最后一条 message 条目之后的 round 消息（其他扩展在同一次边界里追加的条目可能排在它后面，跳过）。
   两种情况下，`details` 与预约一致则追加快照 `roundsStarted + 1`（wrap-up 轮同时置 `wrapUpDone = true`），清空预约。`edit` 调高 `maxGoalRounds` 或 `budget` 时把 `wrapUpDone` 重置为 `false`，触顶后的目标才能再次续跑。
 - 若先到的是 `agent_settled`：预约作废，追加快照 `phase = 'blocked'`、`lastStop = continuation_rejected`（与 5.2 一致），`armed = false`。宿主据此在 UI 上提示"续跑被拒绝"。
 
@@ -268,7 +269,7 @@ Pi 的处理器按加载顺序串行组合，后加载的扩展可以覆盖 `ent
 
 ### 6.4 `agent_settled`
 
-只清理预约（6.3），不续跑。宿主回合到此结束，session 随后被宿主丢弃。
+清理预约（6.3）；本次运行被中止（`aborted: true`）且目标仍是 `active` 时记 `paused / aborted`（7.6；中止压过 `continuation_rejected`）；不续跑。宿主回合到此结束，session 随后被宿主丢弃。
 
 ## 7. 停止策略
 
@@ -290,7 +291,7 @@ Pi 的处理器按加载顺序串行组合，后加载的扩展可以覆盖 `ent
 
 - 轮级：连续两轮 `progress === false` → 下一轮 `kind = hint`；连续三轮 → `blocked / no_progress`。任何一轮有进展即清零。
 - 轮内（`tool_call` 事件）：对 `toolName + JSON.stringify(input)` 取哈希；同一哈希连续出现第 3 次时，返回 `{ block: true, reason: '同样的调用已经执行过，结果不会变化；换一种方式或报告阻碍。' }`；第 5 次时记入停止请求，`agent_before_settle` 以 `no_progress` 停下。计数在轮被接纳时（6.3）清零，不在每个 turn 清零。
-- `truncated` 的轮不算有进展，也不单独停（DSH 在 max tokens 时直接停；V1 交给无进展计数处理，因为截断本身不说明没有进展）。
+- 被截断（`truncated`）的回复不算有进展：它的文字不参与"与上一轮不同"的比较，也不更新"上一轮的文字"；它里面的工具调用 Pi 已判失败。同一轮里成功的非只读工具调用仍算进展。截断也不单独停（DSH 在 max tokens 时直接停；V1 交给无进展计数处理，因为截断本身不说明没有进展）。
 - `subagent` 算有进展的工具（它不在 6.1 的只读集合 `NON_PROGRESS_TOOLS` 里）：一次没有出错的子代理调用就让本轮有进展。子代理内部的工具调用在它自己的 session 里，不进父 session 的 `toolResults` 和 `tool_call` 事件，不影响父 goal 的两级判定。
 
 ### 7.3 需要人
@@ -319,7 +320,7 @@ Pi 的处理器按加载顺序串行组合，后加载的扩展可以覆盖 `ent
 ### 7.6 停止压过续跑
 
 - 中止（宿主 `session.abort()`，或命令里的 `ctx.abort()`）：Pi 跳过 `agent_before_settle`，只在 `agent_settled` 报 `aborted: true`；goal 在 `agent_settled` 里变 `paused / aborted`。中止后 Pi 不会再续跑，所以不会排在续跑后面。
-- `/goal pause`、`/goal clear`：Pi 对扩展命令"立即处理，即使正在流式输出"。命令处理器先写快照（phase=paused 或墓碑），再调用 `ctx.abort()` 中止当前轮。之后 `agent_before_settle` 看到的 phase 已不是 `active`。
+- `/goal pause`、`/goal clear`：Pi 对扩展命令"立即处理，即使正在流式输出"。命令处理器先写快照（phase=paused 或墓碑），再在 goal 原为 `active` 且 agent 正忙时调用 `ctx.abort()` 中止当前轮。Pi 随后跳过 `agent_before_settle`；`agent_settled` 到来时 goal 已不是 `active`，不会再被记成 `aborted`。
 - 三个操作在 UI 上分开：停本轮（中止）、暂停目标、清除目标。
 
 ## 8. 工具与命令
@@ -378,7 +379,7 @@ goal 属于主代理。fork 子代理从父 transcript 起步，继承了父 ses
 
 所以在 `isSubagentSession(ctx.sessionManager.getBranch())` 为真的 session 里（L4 的包内函数，在 `src/subagent.ts`，看 branch 上有没有 `cherry.subagent-origin` 条目）：
 
-- `session_start` 忽略继承来的 goal 状态：当前目标为空（`runtime.goal` 保持 `undefined`），不追加任何快照。
+- `session_start` 忽略继承来的 goal 状态：当前目标为空（`runtime.goal` 保持 `undefined`），不追加任何快照，也不订阅 `port.onApproval`（宿主若把同一个端口给 fork，fork 的订阅不能顶掉父 session 的）。
 - 三个 goal 工具都抛 `GoalError('in_subagent')`，告诉模型目标归主代理管，照常完成交给它的任务。`GoalErrorCode` 为此新增 `in_subagent`：现有的码都说的是目标本身的问题，没有一个表示"这个 session 不该碰目标"。
 - `agent_before_settle` 不续跑。
 - `/goal` 命令在子代理里不可达（子代理的输入是 `subagent` 工具拼出的任务文本，不以 `/` 开头），不另设门控。
