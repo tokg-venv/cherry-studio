@@ -304,7 +304,7 @@ Pi 的处理器按加载顺序串行组合，后加载的扩展可以覆盖 `ent
 
 ### 7.4 错误
 
-`outcome === 'error'` 一律 `blocked / provider_error`，`lastStop.message` 取 assistant 的 `errorMessage`。goal 层不重试：L1 已把重试放在 AI SDK 层，到达这里的错误是重试耗尽后的。用量受限（429）与其他错误的区分留给 L4 的错误分级；V1 的 UI 只展示原文。
+`outcome === 'error'` 一律 `blocked / provider_error`，`lastStop.message` 取 assistant 的 `errorMessage`。goal 层不重试：L1 已把重试放在 AI SDK 层，到达这里的错误是重试耗尽后的。用量受限（429）与其他错误的区分留给以后的错误分级（宿主接入层或单独一层，L4 现在是子代理）；V1 的 UI 只展示原文。
 
 ### 7.5 模型自报
 
