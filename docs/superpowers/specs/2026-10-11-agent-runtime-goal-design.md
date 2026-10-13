@@ -316,7 +316,7 @@ Pi 的处理器按加载顺序串行组合，后加载的扩展可以覆盖 `ent
 ### 7.5 模型自报
 
 - `complete`：先过核验（第 9 节）；通过则 `complete / complete`，本轮结束后不续跑，工具结果在 goal 视图之后另附一段收尾指令："The goal is complete. End your turn with a short summary for the user of what was delivered and how it was checked; do not start new work."。不通过则工具返回错误结果，说明缺什么，goal 继续。
-- `blocked`：需要 `blocked_reason`。人类回合里直接接受（人在场，随时可以 `resume`）。goal 轮里需要连续 `blockedAfter`（默认 3）轮都报过 blocked；不足时返回错误结果："继续尝试；若第 N 轮仍是同一条件再报告"。计数在人类回合开始、用户编辑目标（objective 或上限变化）时清零；不按 revision 清零，因为每轮被接纳都会让 revision +1（5.1）。满足后 `blocked / model_blocked`。
+- `blocked`：需要 `blocked_reason`。人类回合里直接接受（人在场，随时可以 `resume`）。goal 轮里需要连续 `blockedAfter`（默认 3）轮都报过 blocked；不足时返回错误结果："继续尝试；若第 N 轮仍是同一条件再报告"。同一轮里多次上报只算一次。计数在人类回合开始、`resume`、用户编辑目标（objective 或上限变化）时清零；不按 revision 清零，因为每轮被接纳都会让 revision +1（5.1）。满足后 `blocked / model_blocked`。
 
 ### 7.6 停止压过续跑
 
@@ -345,7 +345,7 @@ update_goal(goal_id, revision, action, objective?, max_goal_rounds?, budget_toke
 | 动作 | 条件 |
 |---|---|
 | `create`、`edit`、`pause`、`resume` | 当前宿主回合是人类回合：branch 上最后一条用户消息或 goal 轮消息是用户消息；其他扩展的 `custom_message` 不参与判断 |
-| `complete`、`blocked` | 人类回合或 goal 轮都可以；`complete` 的目标拒绝（完成是终态，新工作要新建目标） |
+| `complete`、`blocked` | 人类回合或 goal 轮都可以；`complete` 的目标拒绝（完成是终态，新工作要新建目标）；`blocked` 的目标再报 `blocked` 时什么都不改（不追加快照） |
 | `create` | 当前没有目标，或当前目标已 `complete` |
 | `resume` | phase 为 `paused` 或 `blocked`，且有余量（轮数和预算都未触顶）；`active` 但 disarmed 时只重新武装；`active` 且已武装时什么都不改（不追加快照）；`complete` 的目标拒绝 |
 | `edit` | 可改 objective、`max_goal_rounds`、`budget_tokens`、`budget_usd`；调高上限且调高后两个限额都有余量时，才重置 `wrapUpDone`，并把 `round_limit` / `budget_exhausted` 导致的 `blocked` 恢复为 `active`（仍需 `resume` 才武装）；只调高其中一个、另一个仍越过时什么都不重开，否则会多跑一轮 wrap-up；不带任何字段的 `edit` 是 `invalid_action`，什么都不改 |
@@ -394,14 +394,14 @@ interface GoalVerifier {
   verify(input: {
     objective: string
     claim: { evidence?: string }
-    /** 最近的对话，经会话模型的 replay 规则处理，与压缩摘要器收到的形状相同 */
+    /** 当前 session 的完整上下文（压缩之后的，不截取），经会话模型的 replay 规则处理，与压缩摘要器收到的形状相同 */
     messages: ConversationModelMessage[]
     signal: AbortSignal
   }): Promise<{ verdict: 'met' | 'not_met' | 'impossible'; reason: string }>
 }
 ```
 
-- 宿主提供 `port.verify` 时：`met` → 完成；`not_met` → 工具返回错误结果并带 `reason`；`impossible` → `blocked / model_blocked`，`message = reason`。核验失败（抛错、超时）按 `not_met` 处理并附原因，不放行。
+- 宿主提供 `port.verify` 时：`met` → 完成；`not_met` → 工具返回错误结果并带 `reason`；`impossible` → `blocked / model_blocked`，`message = reason`。核验失败（抛错，包括宿主 verifier 自己的超时）按 `not_met` 处理并附原因，不放行。包不另设超时：verifier 应遵守 `signal`，并自行限时。
 - 宿主未提供时（V1 默认）退化为两条运行时检查：本 goal 至少有一轮 `progress === true`（快照的 `progressRounds > 0`，或当前轮已有进展）；`evidence` 非空。两条都满足才放行。
 
 调研依据：独立评估器与人类一致率约 90%，模型自报约 70%；给模型"标记不可能"的出口能把作弊率从 54% 降到 9%。宿主侧的评估模型可以单独选择，不受会话模型能力限制，这是 Cherry 多模型架构的优势，放在二期实现。
