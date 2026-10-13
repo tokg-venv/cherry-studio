@@ -228,7 +228,8 @@ Summarize what is done, what is verified, and what remains, then stop.
 
 ```
 1. （中止不走这里：Pi 中止后跳过 agent_before_settle，见 7.6）
-2. outcome === 'error'                         → phase=blocked, code=provider_error；不续跑
+2. outcome === 'error'，且目标 active 并已武装  → phase=blocked, code=provider_error；不续跑
+   （未武装的目标没有在跑，无关的人类回合出错不改它）
 3. 没有当前目标，或 phase !== 'active'           → 不续跑
 4. 有停止请求（见 7.3：审批被拒 / 提问被关 / 无人值守审批）
                                                → phase=blocked, code=对应原因；不续跑
