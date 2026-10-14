@@ -42,6 +42,10 @@ export {
   createAgentRuntimeSession
 } from './session'
 export {
+  MESSAGE_SUBAGENT_TOOL_NAME,
+  STOP_SUBAGENT_TOOL_NAME,
+  SUBAGENT_MESSAGE_TYPE,
+  SUBAGENT_ORIGIN_STATE,
   SUBAGENT_TOOL_NAME,
   type Subagent,
   type SubagentDetails,

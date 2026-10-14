@@ -46,9 +46,10 @@ accounting, retries) applies to Pi's requests unchanged.
   an unfinished call: that the stream ended before its input was complete). A call to an unknown
   tool gets Pi's `Tool <name> not found`. A host registering `createAiSdkProvider` itself must block
   the calls `onInvalidToolCall` reports the same way.
-- **Usage** – the usage handed to Pi feeds its context accounting and compaction only. A `subagent`
-  result also carries its subagent's summed usage on the tool result, for budgets. The host's AI SDK
-  calls already account all of it, so it must not be billed again.
+- **Usage** – the usage handed to Pi feeds its context accounting and compaction only. A foreground
+  `subagent` result also carries its subagent's summed usage on the tool result, and a background
+  run's notification carries it in `details`, for budgets. The host's AI SDK calls already account
+  all of it, so it must not be billed again.
 - **Retries** – Pi's retry is always disabled. Retries belong to the AI SDK layer.
 - **Model identity** – every model has a host `key` (in Cherry, the unique model id). Assistant
   entries store it, and on rebuild only replies with the current key replay their reasoning as
@@ -65,7 +66,9 @@ appended prompt, custom tools, the enabled built-in tools (none by default), ext
 factories, the model descriptor, compaction and Pi settings such as `shellCommandPrefix`. It may
 opt in to workspace `AGENTS.md` / `CLAUDE.md` context files and to explicit skill directories, as
 Cherry's current Pi runtime does. `dispose()` aborts the running turn, emits `session_shutdown` to
-extensions and disposes the session.
+extensions and disposes the session. `prompt()` and `compact()` wrap `session.prompt` and
+`session.compact`; the host starts every user turn and manual compaction through them (see
+Subagents). `stopSubagent()` and `backgroundSubagent()` are the user's controls for subagents.
 
 ## Transcript
 
@@ -97,7 +100,8 @@ host session because it is also the prompt-cache routing key.
   request.
 - **Output** – `onEvent` receives `transcript-append` with new entries in Pi order, each exactly
   once; `compaction-start` / `compaction-end` (after the compaction entry was appended); and
-  `turn-complete` with the head entry id when a run settles. Pi `system`, `model_change`,
+  `turn-complete` with the head entry id when a run settles; `subagents` with the background
+  subagents after each change of one of them. Pi `system`, `model_change`,
   `thinking_level_change` and `usage` entries are never emitted: the host owns the prompt, the
   model and billing.
 - **Tool loadout** – tools activated beyond the session's base tools (by `tool_search`) are
@@ -145,41 +149,86 @@ returns full text. `scope: 'all'` is the same as `'lineage'`: edits drop the tur
 
 ## Subagents
 
-`subagents: SubagentPort` registers `subagent({ description, prompt, fork? })`, a `model-only` tool with DSH's
-name, so Cherry's renderer shows it as a Task card. Each call builds a session in-process from the
-parent's options (port, request options, model, prompts, tools, compaction, offload, recall,
-settings) plus the extensions the host returns from `SubagentPort.configure(subagent)`, starts it
-with `session.prompt()` so `before_agent_start` handlers run as in any turn, waits for it to settle
-and disposes it. It shares the parent's `sideChannel`, so its requests' errors and unmapped parts
-reach the parent's side channel, told apart by the request `sessionId`; the parent's
-`extensionFactories` and `onEvent` are not inherited. The call blocks: the subagent's final message
-is the call's result, `details` is `{ sessionId, fork, outcome }`, and the result's `usage` is the
-sum of the subagent's replies (for budgets; the host already accounted each request). Its transcript
-events go only to the `onEvent` the host returned; `onSessionCreated` receives its session before
-its first request. Its session id is `<parent session id>.<random UUID>`, unique per subagent even
-when provider call ids repeat; treat it as opaque. Subagent calls of one step run at the same time,
-and a fresh subagent has no `subagent` tool of its own.
+`subagents: SubagentPort` registers three `model-only` tools: `subagent({ description, prompt,
+fork?, background?, model? })` with DSH's name, so Cherry's renderer shows it as a Task card,
+`message_subagent({ id, message })` and `stop_subagent({ id })` (`SUBAGENT_TOOL_NAME`,
+`MESSAGE_SUBAGENT_TOOL_NAME`, `STOP_SUBAGENT_TOOL_NAME`). Design:
+`docs/superpowers/specs/2026-10-14-agent-runtime-background-subagent-design.md`.
 
-A subagent's session holds a `cherry.subagent-origin` state entry (`{ parentToolCallId, fork }`),
-never sent to the model; `AskUserQuestion` ends there as `unavailable` without asking the port.
-To find a subagent again: once it ends, the parent's tool result carries its id in
-`details.sessionId`; while it runs, or when its call never returns, `configure` has already handed
-the host its `parentToolCallId` and its `sessionId`, which starts with the parent's id. The origin
-entry is part of the transcript the subagent starts from (after the forked prefix for a fork), so
-`onEvent` never emits it; only the live session that `onSessionCreated` receives holds it.
+Each `subagent` call builds a session in-process from the parent's options (port, request options,
+model, prompts, tools, compaction, offload, recall, settings) plus the extensions the host returns
+from `SubagentPort.configure(subagent)`, and starts it with `session.prompt()` so
+`before_agent_start` handlers run as in any turn. It shares the parent's `sideChannel`, told apart by
+the request `sessionId`; the parent's `extensionFactories` and `onEvent` are not inherited. Its
+session id is a random UUID: the id the model addresses it by and the key the host stores it under.
+A run makes at most 200 model requests, counted where its session makes them: its turns and the
+compaction summaries made for it (Pi's own summarizer through the port, or the host's
+`compaction.summarize`) alike; the 201st is refused before it goes out. Calls of one step run at the
+same time. A fresh subagent has
+none of the three tools; a fork keeps them, so its tools match the parent's, and they fail with
+`Subagents cannot start or manage subagents.`
 
-`fork: true` starts the subagent from the parent's transcript up to the assistant message holding the
-call, every call of that message answered by the same placeholder, so forks of one step send the same
-prefix and can share the prompt cache. A fork keeps the parent's tools, `subagent` included, and the
-host must return the parent's extensions for it; calls a subagent may not make (another `subagent`,
-`AskUserQuestion`, the goal tools) fail or end as `unavailable` instead of being removed.
+- **Foreground** (the default) – the call blocks. Its result is the final message followed by
+  `(id: … — continue this subagent with message_subagent.)`, `details`
+  `{ sessionId, fork, background: false, outcome }` and `usage`, the sum of the subagent's replies.
+  A run that fails, is cut off by its output limit, is aborted with the parent's turn or would start
+  a 201st request returns an `isError` result with the reason and its last partial output
+  (`outcome` `failed`, `truncated`, `aborted`, `limit_reached`). A host whose `configure` throws
+  fails that call only. `backgroundSubagent(sessionId)` moves a running foreground subagent to the
+  background: the call returns at once (`details.background: true`) and the same run goes on; the
+  parent's turn no longer stops it.
+- **Background** (`background: true`) – the call returns its id at once, and stopping the parent's
+  turn does not stop the subagent. At most `maxBackground` (default 20) run at once. When a run
+  ends, its result reaches the parent as a `cherry.subagent-notification` custom message (a user
+  message to the model; `details` is `SubagentNotificationDetails`): merged into the parent's run
+  as it settles, or, when the parent is idle, as the start of a new run, which the host shows as an
+  autonomous turn (`background-work`). Never in the middle of a run; a queued user message goes
+  first, and results that end together go in one message. After the user stops a turn, nothing
+  starts on its own until their next prompt, which pending results ride with. A report over the
+  offload threshold (20,000 characters without offload) is saved through the offload store, or cut
+  to its head and tail.
+- **Messages** – `message_subagent` queues a message for a running subagent: it reads it after its
+  current tool batch, and one that comes as it settles starts its next run in the same session.
+  For a finished subagent it loads the stored transcript (`SubagentPort.load`), configures the
+  same subagent again (`continuedBy`, and `modelKey` from its origin entry), answers tool calls an
+  interrupted run left open with an "interrupted" result and runs the message in the background,
+  after a recovery hint when the last run was interrupted or aborted. Without `load`, finished
+  subagents cannot be continued. The id must be one this conversation started.
+- **Stopping** – `stop_subagent` stops a running subagent and returns its partial output; no
+  notification follows, and it can be continued. `stopSubagent(sessionId)` is the user's stop
+  button for a background subagent: the parent hears of it only with its next message, and it
+  cannot be continued. Disposing the parent stops and disposes every subagent session.
 
-A subagent that fails, is cut off by its output limit, is aborted with the parent's turn or would
-start a 201st model request returns an `isError` result with the reason, its last partial output,
-`details` and `usage`; `outcome` is `failed`, `truncated`, `aborted` or `limit_reached`. Requests
-are counted where its session makes them: its turns and the compaction summaries made for it (Pi's
-own summarizer through the port, or the host's `compaction.summarize`) alike, and the 201st is
-refused before it goes out. A host whose `configure` throws fails that call only.
+With `SubagentPort.findModels`, `subagent` takes a `model` the user named: the package resolves it
+among the exact candidates the host finds (none or several fail and tell the model what to ask) and
+hands the key to `configure` as `Subagent.modelKey`, for which the host must return that model in
+`SubagentSessionOptions.model`. Without a named model the host may return its default subagent
+model; otherwise the subagent runs on the parent's. A fork always keeps the parent's model, and a
+continuation the model of its first run.
+
+The host's approval extension comes from `configure` and labels each request with `Subagent`.
+`SubagentPort.onApproval` (the host's one approval registry) marks a subagent `awaiting_approval`
+while one of its calls waits; the parent sees this in the `subagents` event, its status message and
+errors that list subagents.
+
+The parent records each background run in `cherry.subagent-state` snapshots (started; finished with
+its outcome, result and usage), never sent to the model, and `onEvent` gets
+`{ type: 'subagents', subagents: SubagentView[] }` after each change. A rebuilt parent restores its
+subagents from them and from `subagent` results: a run whose last snapshot is `running` was cut off
+(`interrupted`) and can be continued; such runs, and results that never reached the parent, ride
+with the user's next message, once. After a compaction a `cherry.subagent-status` message lists the
+background subagents still running and the results not delivered yet.
+
+A subagent's `onEvent` receives its whole transcript: the first `transcript-append` holds its start
+entries, the forked prefix and a `cherry.subagent-origin` state entry
+(`{ parentToolCallId, fork, description, modelKey }`, never sent to the model). The host stores it
+per `sessionId` to implement `load`. `onSessionCreated` receives the live session before its first
+request. `AskUserQuestion` ends as `unavailable` inside a subagent without asking the port.
+
+Host contract: start user turns with `AgentRuntimeSession.prompt` and manual compactions with
+`compact`, never `session.prompt` or `session.compact` directly (Pi reports a preparing prompt as
+idle, and a notification run would collide with it); do not dispose or rebuild the parent while
+background subagents run.
 
 ## Extensions
 
@@ -216,9 +265,9 @@ handles.
   a cap lowered to the running round ends the goal with it), token or USD budget, no progress
   (two rounds hint, three stop; the same tool call three times in
   a row within a round is blocked, five times ends the goal), a denied approval, an approval nobody
-  can give or a dismissed question in a goal round, background subagents the host reports as
-  running, a round another extension's settle handler overrides, and a failed request or an abort
-  (`session.abort()` or the host's own request signal) while the goal is armed. Usage is never
+  can give or a dismissed question in a goal round, a round another extension's settle handler
+  overrides, and a failed request or an abort (`session.abort()` or the host's own request signal)
+  while the goal is armed. Usage is never
   kept: every check (the budget, `resume`, `/goal`, `get_goal`) reads it from the transcript, so a
   rebuilt session sees what the live one saw. It is every request made in one of the goal's
   admitted rounds while the goal was active, the request whose tool call stopped it included and
@@ -255,8 +304,15 @@ handles.
   goal drives it (active and armed). `session.prompt('/goal …')` returns once the command is
   handled: a command that starts a round ends with `turn-complete` as usual, the others (the
   status, a pause while idle, …) produce none. A rebuilt session restores the goal disarmed and
-  writes that down (`armed: false` in a snapshot of the same revision); `/goal resume` continues it. The budget also counts the `usage` a tool result carries, so a
-  `subagent` call's requests count toward it. When `port.modelSupportsTools()` is false, no tools
+  writes that down (`armed: false` in a snapshot of the same revision); `/goal resume` continues it.
+  The budget also counts the `usage` a tool result carries, so a `subagent` call's requests count
+  toward it. While background subagents run, an armed goal waits (no round, no stop; `/goal` shows
+  `Waiting for N background subagents`) and goes on after their notification's turn settles. That
+  turn is neither a human turn nor a goal round; while the goal is armed its usage counts toward the
+  budget, and so does the usage of background subagents the goal's rounds started, once delivered.
+  Once the budget is used up, background launches fail and the goal's running background subagents
+  stop. `port.onApproval` events of calls not executing in this session (a subagent's) are ignored.
+  When `port.modelSupportsTools()` is false, no tools
   or command are registered and an active goal is blocked with `unsupported_model`. In a
   subagent's session the goal tools fail with `in_subagent`, nothing continues and
   `port.onApproval` is not subscribed, so a fork ignores the goal entries it inherits. Design:
@@ -269,8 +325,9 @@ session's list). `ASK_USER_TOOL_NAME` and `TODO_TOOL_NAME` hold the names.
 The host sets `create_goal` to ask for approval, so a goal the model proposes is confirmed by the
 user through the existing approval card. `GOAL_TOOL_NAMES` holds the goal tools' names.
 
-The approval layer may auto-allow `subagent` as long as `SubagentPort.configure()` returns the
-approval extension, so each call the subagent makes is approved on its own.
+The approval layer may auto-allow `subagent`, `message_subagent` and `stop_subagent` as long as
+`SubagentPort.configure()` returns the approval extension, so each call a subagent makes is approved
+on its own.
 
 ## Known gaps
 
@@ -297,12 +354,17 @@ approval extension, so each call the subagent makes is approved on its own.
   will is decided when the host is wired up.
 - A fork's requests carry the subagent's session id, so a host that routes prompt caches by session id
   (OpenAI's `prompt_cache_key`) does not reach the parent's cache partition.
-- Goals: no `waiting` state for background work (the goal blocks with `waiting_subagents` when the
-  host reports running background subagents, which only L6 adds) and no fresh-context (Ralph)
-  mode. The package does not know the permission mode; keeping goals from running rounds in plan
-  mode is up to the host.
+- Goals: no fresh-context (Ralph) mode. The package does not know the permission mode; keeping
+  goals from running rounds in plan mode is up to the host.
 - A `session.abort()` that lands in the run withdrawing a stale goal round (it ends before any
   request) is taken for that withdrawal: the goal goes on instead of pausing.
+- Every fork stores the parent's prefix in its own transcript; a host may deduplicate it.
+- A background result reaches a busy parent only when its run settles, after the whole turn.
+- Shutdown writes no snapshots, so a rebuilt parent cannot tell a closed app from a crash.
+- Messages queued for a running subagent that is then stopped are dropped with it.
+- Approval events find their subagent by call id; two sessions running calls with the same id at
+  the same moment cannot be told apart.
+- A subagent on another model gets the parent's `requestOptions`.
 
 ## Tests
 
