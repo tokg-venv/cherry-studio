@@ -12,7 +12,7 @@ import {
   toolResultOf,
   toolResults
 } from './subagentSupport'
-import { createTestSession, finish, hostStore, streamTextPort, textParts } from './support'
+import { createTestSession, finish, hostStore, plain, streamTextPort, textParts } from './support'
 
 const forkA = { description: 'Check A', prompt: 'TASK-A', fork: true }
 const forkB = { description: 'Check B', prompt: 'TASK-B', fork: true }
@@ -148,6 +148,32 @@ describe('subagent fork', () => {
     const nested = toolResults(calls.filter((call) => call.userText.includes('TASK-A'))[1]).at(-1)!
     expect(nested.toolCallId).toBe('call_nested')
     expect(outputText(nested.output)).toMatch(/cannot start subagents/)
+  })
+
+  // Breaks when the fork prefix is not handed to the host: the stored transcript would start at the
+  // origin entry and a rebuilt fork would lose the conversation it was forked from.
+  it("hands the host a fork's whole transcript, so the stored copy rebuilds it with the forked prefix", async () => {
+    const { model, calls } = routedModel(({ userText, lastRole }) => {
+      if (userText.includes('TASK-A')) return [...textParts('r', 'REPORT-A'), finish('stop')]
+      return lastRole === 'user'
+        ? [subagentCall('call_a', forkA), finish('tool-calls')]
+        : [...textParts('d', 'Done'), finish('stop')]
+    })
+    const host = recordingSubagentPort()
+    const { session } = await createTestSession({ port: streamTextPort(model).port, subagents: host.port })
+    await session.prompt('Check module A with the codename ORCHID')
+
+    const stored = host.events
+      .get(host.subagents[0].sessionId)!
+      .flatMap((event) => (event.type === 'transcript-append' ? event.entries : []))
+    const rebuilt = await createTestSession({ port: streamTextPort(model).port, transcript: plain(stored) })
+    await rebuilt.session.prompt('FOLLOW-UP')
+
+    const request = calls.at(-1)!
+    expect(request.userText).toContain('ORCHID')
+    expect(request.userText).toContain('TASK-A')
+    expect(toolResults(request).map((part) => part.toolCallId)).toEqual(['call_a'])
+    expect(outputText(toolResults(request)[0].output)).toMatch(/still running/)
   })
 
   it('forks a session rebuilt from the host transcript with the replayed history', async () => {

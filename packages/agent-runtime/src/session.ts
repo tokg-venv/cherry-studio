@@ -190,7 +190,8 @@ export async function createAgentRuntimeSession<TRequestOptions>(
                 ...gateModelRequests(options, beforeModelRequest),
                 subagents: fork ? options.subagents : undefined
               }),
-            parentTranscript: () => tap.entries()
+            parentTranscript: () => tap.entries(),
+            parentModelKey: key
           })
         ]
       : []),
