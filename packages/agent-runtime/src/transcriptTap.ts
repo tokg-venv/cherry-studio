@@ -11,6 +11,7 @@ import type { JSONValue } from 'ai'
 import { AI_SDK_API } from './aiSdkProvider'
 import { toModelMessage, toUserContent } from './modelMessages'
 import type { TranscriptModel } from './rebuild'
+import type { SubagentView } from './subagentRegistry'
 import {
   STATE_TYPE_PREFIX,
   TOOL_LOADOUT_STATE,
@@ -30,6 +31,8 @@ export type AgentRuntimeEvent =
   | { type: 'compaction-end'; reason: CompactionReason; entryId?: string; error?: string }
   /** An agent run settled; every entry up to `headEntryId` has been emitted. */
   | { type: 'turn-complete'; headEntryId: string | undefined; aborted: boolean }
+  /** The parent's background subagents after a change; the host maps it to its background tasks. */
+  | { type: 'subagents'; subagents: SubagentView[] }
 
 type Listener = (event: AgentRuntimeEvent) => void
 

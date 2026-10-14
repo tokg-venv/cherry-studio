@@ -50,9 +50,11 @@ export {
   SUBAGENT_TOOL_NAME,
   type Subagent,
   type SubagentDetails,
+  type SubagentOutcome,
   type SubagentPort,
   type SubagentSessionOptions
 } from './subagent'
+export { SUBAGENT_STATE_TYPE, type SubagentState, type SubagentStatus, type SubagentView } from './subagentRegistry'
 export {
   createTodoExtension,
   TODO_TOOL_NAME,
