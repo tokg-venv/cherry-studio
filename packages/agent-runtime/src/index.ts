@@ -11,13 +11,7 @@ export {
   createAskUserExtension
 } from './askUserExtension'
 export type { AgentRuntimeCompaction, CompactionSummarizer, CompactionSummaryRequest } from './compaction'
-export {
-  createGoalExtension,
-  GOAL_TOOL_NAMES,
-  type GoalApprovalEvent,
-  type GoalPort,
-  type GoalVerifier
-} from './goalExtension'
+export { createGoalExtension, GOAL_TOOL_NAMES, type GoalPort, type GoalVerifier } from './goalExtension'
 export {
   GOAL_NOTICE_TYPE,
   GOAL_ROUND_TYPE,
@@ -37,6 +31,7 @@ export type {
   ModelCallRequest,
   ModelCallResult,
   ModelCallSideChannel,
+  ToolApprovalEvent,
   UnmappedStreamPart
 } from './ports'
 export {

@@ -44,12 +44,8 @@ import {
   withUsage
 } from './goalState'
 import { type ConversationModelMessage, toModelMessages } from './modelMessages'
+import type { ToolApprovalEvent } from './ports'
 import { isSubagentSession } from './subagent'
-
-export interface GoalApprovalEvent {
-  kind: 'pending' | 'granted' | 'denied' | 'unavailable'
-  toolCallId: string
-}
 
 /** Host-side completion check; without it the extension falls back to runtime checks (spec §9). */
 export interface GoalVerifier {
@@ -76,7 +72,7 @@ export interface GoalPort {
   }
   modelSupportsTools(): boolean
   /** Wired by the host integration (its ToolApprovalRegistry): approval events of this session's tool calls. */
-  onApproval?(listener: (event: GoalApprovalEvent) => void): () => void
+  onApproval?(listener: (event: ToolApprovalEvent) => void): () => void
   /** L6: background subagents of this session still running; foreground subagents finish inside their call. */
   hasRunningSubagents?(): boolean
   verify?: GoalVerifier
