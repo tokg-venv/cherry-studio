@@ -58,6 +58,7 @@ export {
 export {
   NOTIFICATION_THRESHOLD_CHARS,
   SUBAGENT_NOTIFICATION_TYPE,
+  SUBAGENT_STATUS_TYPE,
   type SubagentNotificationDetails
 } from './subagentDelivery'
 export { SUBAGENT_STATE_TYPE, type SubagentState, type SubagentStatus, type SubagentView } from './subagentRegistry'
