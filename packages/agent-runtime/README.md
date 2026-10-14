@@ -48,8 +48,9 @@ accounting, retries) applies to Pi's requests unchanged.
   the calls `onInvalidToolCall` reports the same way.
 - **Usage** – the usage handed to Pi feeds its context accounting and compaction only. A foreground
   `subagent` result also carries its subagent's summed usage on the tool result, and a background
-  run's notification carries it in `details`, for budgets. The host's AI SDK calls already account
-  all of it, so it must not be billed again.
+  run's notification (or the `stop_subagent` result of a run the model stopped) carries it in
+  `details`, for budgets. The host's AI SDK calls already account all of it, so it must not be
+  billed again.
 - **Retries** – Pi's retry is always disabled. Retries belong to the AI SDK layer.
 - **Model identity** – every model has a host `key` (in Cherry, the unique model id). Assistant
   entries store it, and on rebuild only replies with the current key replay their reasoning as
@@ -184,7 +185,9 @@ none of the three tools; a fork keeps them, so its tools match the parent's, and
   as it settles, or, when the parent is idle, as the start of a new run, which the host shows as an
   autonomous turn (`background-work`). Never in the middle of a run; a queued user message goes
   first, and results that end together go in one message. After the user stops a turn, nothing
-  starts on its own until their next prompt, which pending results ride with. A report over the
+  starts on its own until their next prompt, which pending results ride with. Results that start no
+  run (the user's stops, those a rebuild restores) ride with the next notification or prompt, or are
+  merged as a run no prompt started (a command's, such as `/goal resume`) settles. A report over the
   offload threshold (20,000 characters without offload) is saved through the offload store, or cut
   to its head and tail.
 - **Messages** – `message_subagent` queues a message for a running subagent: it reads it after its
@@ -193,31 +196,42 @@ none of the three tools; a fork keeps them, so its tools match the parent's, and
   same subagent again (`continuedBy`, and `modelKey` from its origin entry), answers tool calls an
   interrupted run left open with an "interrupted" result and runs the message in the background,
   after a recovery hint when the last run was interrupted or aborted. Without `load`, finished
-  subagents cannot be continued. The id must be one this conversation started.
+  subagents cannot be continued. The id must be one this conversation started. A message to a
+  subagent being stopped waits for the stop, then continues it or is refused as for a finished one.
+  `details` is `SubagentMessageDetails`: `{ sessionId, continued: false }` when queued,
+  `{ sessionId, continued: true, run }` when it started a run.
 - **Stopping** – `stop_subagent` stops a running subagent and returns its partial output; no
-  notification follows, and it can be continued. `stopSubagent(sessionId)` is the user's stop
-  button for a background subagent: the parent hears of it only with its next message, and it
-  cannot be continued. Disposing the parent stops and disposes every subagent session.
+  notification follows, and it can be continued. Its `details` (`SubagentStopDetails`) is
+  `{ sessionId, stopped: true, run, usage }` with the stopped run's usage, or
+  `{ sessionId, stopped: false }`. `stopSubagent(sessionId)` is the user's stop button for a
+  background subagent: the parent hears of it only with its next message, and it cannot be
+  continued. Disposing the parent stops and disposes every subagent session; a run that had ended
+  on its own by then keeps its result, which the rebuilt parent delivers.
 
 With `SubagentPort.findModels`, `subagent` takes a `model` the user named: the package resolves it
 among the exact candidates the host finds (none or several fail and tell the model what to ask) and
 hands the key to `configure` as `Subagent.modelKey`, for which the host must return that model in
-`SubagentSessionOptions.model`. Without a named model the host may return its default subagent
-model; otherwise the subagent runs on the parent's. A fork always keeps the parent's model, and a
-continuation the model of its first run.
+`SubagentSessionOptions.model`, unless the key is the parent's current model: then the parent's
+model runs it when the host returns none, so a host that never picks models can still continue
+subagents. Without a named model the host may return its default subagent model; otherwise the
+subagent runs on the parent's. A fork always keeps the parent's model, and a continuation the model
+of its first run.
 
 The host's approval extension comes from `configure` and labels each request with `Subagent`.
 `SubagentPort.onApproval` (the host's one approval registry) marks a subagent `awaiting_approval`
 while one of its calls waits; the parent sees this in the `subagents` event, its status message and
-errors that list subagents.
+errors that list subagents. Each event should name the session that runs the call
+(`ToolApprovalEvent.sessionId`, `ctx.sessionManager.getSessionId()` in the approval extension);
+without it, sessions are told apart by call id alone.
 
 The parent records each background run in `cherry.subagent-state` snapshots (started; finished with
 its outcome, result and usage), never sent to the model, and `onEvent` gets
 `{ type: 'subagents', subagents: SubagentView[] }` after each change. A rebuilt parent restores its
 subagents from them and from `subagent` results: a run whose last snapshot is `running` was cut off
 (`interrupted`) and can be continued; such runs, and results that never reached the parent, ride
-with the user's next message, once. After a compaction a `cherry.subagent-status` message lists the
-background subagents still running and the results not delivered yet.
+with the user's next message (or the settle of a turn a command starts), once. After a compaction a
+`cherry.subagent-status` message lists the background subagents still running and the results not
+delivered yet.
 
 A subagent's `onEvent` receives its whole transcript: the first `transcript-append` holds its start
 entries, the forked prefix and a `cherry.subagent-origin` state entry
@@ -228,7 +242,9 @@ request. `AskUserQuestion` ends as `unavailable` inside a subagent without askin
 Host contract: start user turns with `AgentRuntimeSession.prompt` and manual compactions with
 `compact`, never `session.prompt` or `session.compact` directly (Pi reports a preparing prompt as
 idle, and a notification run would collide with it); do not dispose or rebuild the parent while
-background subagents run.
+background subagents run. A `prompt` or `compact` called while a run settles (from `onEvent`'s
+`turn-complete`, where Pi itself would defer it and return at once) waits until that settle and any
+run Pi started during it are over, then runs, and resolves or rejects as it does.
 
 ## Extensions
 
@@ -305,17 +321,19 @@ handles.
   handled: a command that starts a round ends with `turn-complete` as usual, the others (the
   status, a pause while idle, …) produce none. A rebuilt session restores the goal disarmed and
   writes that down (`armed: false` in a snapshot of the same revision); `/goal resume` continues it.
-  The budget also counts the `usage` a tool result carries, so a `subagent` call's requests count
-  toward it. While background subagents run, an armed goal waits (no round, no stop; `/goal` shows
-  `Waiting for N background subagents`) and goes on after their notification's turn settles. That
-  turn is neither a human turn nor a goal round; while the goal is armed its usage counts toward the
-  budget, and so does the usage of background subagents the goal's rounds started, once delivered.
-  Once the budget is used up, background launches fail and the goal's running background subagents
-  stop. `port.onApproval` events of calls not executing in this session (a subagent's) are ignored.
-  When `port.modelSupportsTools()` is false, no tools
-  or command are registered and an active goal is blocked with `unsupported_model`. In a
-  subagent's session the goal tools fail with `in_subagent`, nothing continues and
-  `port.onApproval` is not subscribed, so a fork ignores the goal entries it inherits. Design:
+  The budget also counts the `usage` a tool result carries, so a
+  `subagent` call's requests count toward it. While background subagents run, an armed goal waits
+  (no round, no stop; `/goal` shows `Waiting for N background subagents`) and goes on after their
+  notification's turn settles. That turn is neither a human turn nor a goal round; while the goal
+  is armed its usage counts toward the budget, and so does the usage of every run of a subagent the
+  goal's rounds launched, moved or continued in the background, once its notification is delivered
+  or the model stops it. Once the budget is used up, background launches fail and the goal's running
+  background subagents stop. `port.onApproval` events of other sessions (by `sessionId`, or calls not
+  executing in this session when an event has none) are ignored. When `port.modelSupportsTools()`
+  is false, no tools or command are registered and an active goal is blocked with
+  `unsupported_model`. In a subagent's session the goal tools fail with `in_subagent`, nothing
+  continues and `port.onApproval` is not subscribed, so a fork ignores the goal entries it inherits.
+  Design:
   `docs/superpowers/specs/2026-10-11-agent-runtime-goal-design.md`.
 
 The host's approval layer must not ask approval for `AskUserQuestion` (the question is itself the
@@ -360,10 +378,12 @@ on its own.
   request) is taken for that withdrawal: the goal goes on instead of pausing.
 - Every fork stores the parent's prefix in its own transcript; a host may deduplicate it.
 - A background result reaches a busy parent only when its run settles, after the whole turn.
-- Shutdown writes no snapshots, so a rebuilt parent cannot tell a closed app from a crash.
-- Messages queued for a running subagent that is then stopped are dropped with it.
-- Approval events find their subagent by call id; two sessions running calls with the same id at
-  the same moment cannot be told apart.
+- Shutdown writes no snapshots for the runs it cuts off, so a rebuilt parent cannot tell a closed
+  app from a crash.
+- Messages queued for a running subagent before it is stopped are dropped with it.
+- Approval events without `sessionId` find their session by call id: two sessions running calls
+  with the same id at the same moment cannot be told apart. For a foreground subagent that moment
+  is its whole run, since the parent's `subagent` call runs all the while.
 - A subagent on another model gets the parent's `requestOptions`.
 
 ## Tests
