@@ -52,8 +52,14 @@ export {
   type SubagentDetails,
   type SubagentOutcome,
   type SubagentPort,
-  type SubagentSessionOptions
+  type SubagentSessionOptions,
+  type SubagentStopper
 } from './subagent'
+export {
+  NOTIFICATION_THRESHOLD_CHARS,
+  SUBAGENT_NOTIFICATION_TYPE,
+  type SubagentNotificationDetails
+} from './subagentDelivery'
 export { SUBAGENT_STATE_TYPE, type SubagentState, type SubagentStatus, type SubagentView } from './subagentRegistry'
 export {
   createTodoExtension,
