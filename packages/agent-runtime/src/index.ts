@@ -49,10 +49,12 @@ export {
   SUBAGENT_TOOL_NAME,
   type Subagent,
   type SubagentDetails,
+  type SubagentMessageDetails,
   type SubagentModelCandidate,
   type SubagentOutcome,
   type SubagentPort,
   type SubagentSessionOptions,
+  type SubagentStopDetails,
   type SubagentStopper
 } from './subagent'
 export {
