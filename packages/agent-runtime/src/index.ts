@@ -45,6 +45,7 @@ export {
   SUBAGENT_TOOL_NAME,
   type Subagent,
   type SubagentDetails,
+  type SubagentModelCandidate,
   type SubagentOutcome,
   type SubagentPort,
   type SubagentSessionOptions,
