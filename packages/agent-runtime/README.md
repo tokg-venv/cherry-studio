@@ -201,7 +201,8 @@ none of the three tools; a fork keeps them, so its tools match the parent's, and
   `details` is `SubagentMessageDetails`: `{ sessionId, continued: false }` when queued,
   `{ sessionId, continued: true, run }` when it started a run.
 - **Stopping** – `stop_subagent` stops a running subagent and returns its partial output; no
-  notification follows, and it can be continued. Its `details` (`SubagentStopDetails`) is
+  notification follows, and it can be continued, unless the user also stopped that run (before or
+  after the model). Its `details` (`SubagentStopDetails`) is
   `{ sessionId, stopped: true, run, usage }` with the stopped run's usage, or
   `{ sessionId, stopped: false }`. `stopSubagent(sessionId)` is the user's stop button for a
   background subagent: the parent hears of it only with its next message, and it cannot be
