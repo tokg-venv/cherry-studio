@@ -67,6 +67,16 @@ export async function createAgentRuntimeSession<TRequestOptions>(
   const { cwd, agentDir } = options
   const { provider, ...modelSpec } = options.model
 
+  // Pi validates `{}` before `tool_call`, so only a schema that accepts it reaches the guard.
+  const invalidToolCalls = new Map<string, string>()
+  const invalidToolCallGuard: ExtensionFactory = (pi) => {
+    pi.on('turn_start', () => invalidToolCalls.clear())
+    pi.on('tool_call', (event) => {
+      const reason = invalidToolCalls.get(event.toolCallId)
+      return reason === undefined ? undefined : { block: true, reason }
+    })
+  }
+
   const modelRuntime = await ModelRuntime.create({
     credentials: new InMemoryCredentialStore(),
     modelsPath: null,
@@ -78,7 +88,8 @@ export async function createAgentRuntimeSession<TRequestOptions>(
       port: options.port,
       requestOptions: options.requestOptions,
       sideChannel: options.sideChannel,
-      models: [modelSpec]
+      models: [modelSpec],
+      onInvalidToolCall: (toolCallId, error) => invalidToolCalls.set(toolCallId, error)
     })
   )
   const model = modelRuntime.getModel(provider, modelSpec.id)
@@ -95,7 +106,8 @@ export async function createAgentRuntimeSession<TRequestOptions>(
     noThemes: true,
     noContextFiles: !options.contextFiles,
     additionalSkillPaths: options.skillPaths,
-    extensionFactories: options.extensionFactories,
+    // First, so no host `tool_call` handler (an approval prompt) sees a call Pi will not run.
+    extensionFactories: [invalidToolCallGuard, ...(options.extensionFactories ?? [])],
     // Overriding (even with undefined) keeps disk-discovered SYSTEM.md / APPEND_SYSTEM.md out.
     systemPromptOverride: () => options.systemPrompt,
     appendSystemPromptOverride: () => options.appendSystemPrompt ?? []
