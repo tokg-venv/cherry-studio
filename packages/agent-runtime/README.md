@@ -228,10 +228,10 @@ The parent records each background run in `cherry.subagent-state` snapshots (sta
 its outcome, result and usage), never sent to the model, and `onEvent` gets
 `{ type: 'subagents', subagents: SubagentView[] }` after each change. A rebuilt parent restores its
 subagents from them and from `subagent` results: a run whose last snapshot is `running` was cut off
-(`interrupted`) and can be continued; such runs, and results that never reached the parent, ride
-with the user's next message (or the settle of a turn a command starts), once. After a compaction a
-`cherry.subagent-status` message lists the background subagents still running and the results not
-delivered yet.
+(`interrupted`) and can be continued; such runs, and every run's result that never reached the
+parent, ride with the user's next message (or the settle of a turn a command starts), once. After a
+compaction a `cherry.subagent-status` message lists the background subagents still running and the
+results not delivered yet.
 
 A subagent's `onEvent` receives its whole transcript: the first `transcript-append` holds its start
 entries, the forked prefix and a `cherry.subagent-origin` state entry
