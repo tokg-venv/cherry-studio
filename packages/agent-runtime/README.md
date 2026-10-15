@@ -327,7 +327,8 @@ handles.
   notification's turn settles. That turn is neither a human turn nor a goal round; while the goal
   is armed its usage counts toward the budget, and so does the usage of every run of a subagent the
   goal's rounds launched, moved or continued in the background, once its notification is delivered
-  or the model stops it. Once the budget is used up, background launches fail and the goal's running
+  or the model stops it, whether the goal is running then or not (disarmed, paused or blocked).
+  Once the budget is used up, background launches fail and the goal's running
   background subagents stop. `port.onApproval` events of other sessions (by `sessionId`, or calls not
   executing in this session when an event has none) are ignored. When `port.modelSupportsTools()`
   is false, no tools or command are registered and an active goal is blocked with
