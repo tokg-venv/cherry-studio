@@ -144,6 +144,8 @@ function mergePiBashExecutionEnv(env: NodeJS.ProcessEnv): Record<string, string>
 
 interface PendingSteer {
   input: AgentRuntimeUserInput
+  /** The text handed to pi; its user message carries it, unlike the run's own prompt. */
+  text: string
 }
 
 export class PiRuntimeConnection implements AgentRuntimeConnection {
@@ -526,7 +528,7 @@ export class PiRuntimeConnection implements AgentRuntimeConnection {
     // filesystem agents; pi's native image channel stays unused until Cherry models multimodal agent
     // attachments end-to-end.
     const wrappedText = wrapSteerReminder(buildAgentUserContent(input.message))
-    const pending: PendingSteer = { input }
+    const pending: PendingSteer = { input, text: wrappedText }
     this.pendingSteers.push(pending)
     void session.steer(wrappedText).catch((error) => {
       this.removePendingSteer(pending)
@@ -643,7 +645,8 @@ export class PiRuntimeConnection implements AgentRuntimeConnection {
 
     if (event.type === 'tool_execution_start') this.startToolSpan(event)
 
-    if (isUserMessageStart(event) && this.pendingSteers.length > 0) {
+    // pi accepts a steer while a run starts, before that run's own prompt message: only the steer delivers it.
+    if (this.pendingSteers.length > 0 && userMessageStartText(event) === this.pendingSteers[0].text) {
       const delivered = this.takeDeliveredSteers()
       if (delivered.length > 0) this.eventQueue.push({ type: 'steer-boundary', inputs: delivered })
     }
@@ -1114,8 +1117,12 @@ function buildCompactionAnchor(
   return anchor
 }
 
-function isUserMessageStart(event: AgentSessionEvent): boolean {
-  return event.type === 'message_start' && (event.message as { role?: string }).role === 'user'
+function userMessageStartText(event: AgentSessionEvent): string | undefined {
+  if (event.type !== 'message_start' || event.message.role !== 'user') return undefined
+  const { content } = event.message
+  return typeof content === 'string'
+    ? content
+    : content.flatMap((part) => (part.type === 'text' ? [part.text] : [])).join('')
 }
 
 function lastErrorMessage(messages: unknown): string | undefined {

@@ -315,6 +315,10 @@ function approvalGateHandler(): (event: unknown, ctx: unknown) => Promise<{ bloc
   return handler
 }
 
+function userMessageStart(text: string): AgentSessionEvent {
+  return { type: 'message_start', message: { role: 'user', content: [{ type: 'text', text }] } } as AgentSessionEvent
+}
+
 async function collectUntilTerminal(events: AsyncIterable<AgentRuntimeEvent>): Promise<AgentRuntimeEvent[]> {
   const out: AgentRuntimeEvent[] = []
   const iter = events[Symbol.asyncIterator]()
@@ -1356,7 +1360,7 @@ describe('PiRuntimeConnection', () => {
     expect(conn.redirect(steer)).toBe(true)
     const cb = mocks.subscribeCb!
 
-    cb({ type: 'message_start', message: { role: 'user' } } as unknown as AgentSessionEvent)
+    cb(userMessageStart(mocks.steer.mock.calls[0][0]))
     cb({ type: 'message_start', message: { role: 'assistant' } } as unknown as AgentSessionEvent)
     cb({
       type: 'message_update',
@@ -1371,6 +1375,31 @@ describe('PiRuntimeConnection', () => {
     expect(events[boundaryIndex]).toMatchObject({ type: 'steer-boundary', inputs: [steer] })
     expect(boundaryIndex).toBeGreaterThanOrEqual(0)
     expect(boundaryIndex).toBeLessThan(chunkIndex)
+  })
+
+  it("emits steer-boundary at the steer's message, not at the prompt of a run that is still starting", async () => {
+    mocks.isStreaming = true
+    const conn = await new PiRuntimeConnection(input).start()
+    const steer = userInput('new direction')
+    expect(conn.redirect(steer)).toBe(true)
+    const cb = mocks.subscribeCb!
+    const iter = conn.events[Symbol.asyncIterator]()
+    let next = iter.next()
+    const emittedTypes = async () => {
+      const types: string[] = []
+      for (;;) {
+        const result = await Promise.race([next, new Promise<undefined>((resolve) => setTimeout(resolve, 20))])
+        if (!result || result.done) return types
+        types.push(result.value.type)
+        next = iter.next()
+      }
+    }
+
+    // pi streams from the run's start, so the run's own prompt can come before the steer it accepted.
+    cb(userMessageStart('the prompt that started the run'))
+    expect(await emittedTypes()).not.toContain('steer-boundary')
+    cb(userMessageStart(mocks.steer.mock.calls[0][0]))
+    expect(await emittedTypes()).toEqual(['steer-boundary'])
   })
 
   it('emits undelivered steers before turn-complete when the turn ends first', async () => {
