@@ -270,6 +270,7 @@ Pi 的处理器按加载顺序串行组合，后加载的扩展可以覆盖 `ent
   - 在 `agent_before_settle` 返回 `{ entries, continue: true }` 续跑的轮：Pi 在 `agent_start` / `turn_start` 之前就把 round 消息写进 branch，而且扩展收不到它的 `message_end`；所以在下一个 `turn_start` 找 branch 上最后一条 message 条目之后的 round 消息（其他扩展在同一次边界里追加的条目可能排在它后面，跳过）。
   两种情况下，`details` 与预约一致则追加快照 `roundsStarted + 1`（wrap-up 轮同时置 `wrapUpDone = true`），清空预约。`edit` 调高 `maxGoalRounds` 或 `budget`、且调高后有余量时，把 `wrapUpDone` 重置为 `false`，触顶后的目标才能再次续跑。
 - 若先到的是 `agent_settled`：预约作废，追加快照 `phase = 'blocked'`、`lastStop = continuation_rejected`（与 5.2 一致），`armed = false`。宿主据此在 UI 上提示"续跑被拒绝"。
+- Pi 不论是否续跑都会提交边界条目，所以被否决（或 settle 时中止、崩溃）的轮消息留在 branch 上。`context` 处理器把它从之后的每次请求里去掉：一条轮消息算跑过，当且仅当它之前的那条快照（命令开的轮）或它之后的第一条快照（settle 开的轮）的 `roundsStarted` 达到它的轮号。判断只读 branch，重建的 session 发出的请求与 live 一致；transcript 里照样保留这条消息。
 
 这和 DSH 的"只有被接纳的 goal 消息才推进轮数"一致。
 
@@ -510,3 +511,4 @@ L4（前台子代理，PR #21578）已完成，L5 基于它实现：包内任务
 
 1. 运行中把轮数上限调低到已开的轮数（例如第 1 轮里 `/goal rounds 1`）时，settle 直接 `round_limit` 停下，不再预约一轮 wrap-up（6.2 第 10 条）。
 2. 用量在每条 assistant 消息和工具结果的 `message_end` 计入，只在目标仍为 `active` 时计入（6.1）：`update_goal` 让 goal 停下时，发出这次调用的请求在停止快照里，重建后的 `/goal resume` 不会越过已经用完的预算；停下之后的请求不计。
+3. 被否决或 settle 时中止的轮消息不再进入之后的请求（6.3），README 的对应已知缺口删除。
