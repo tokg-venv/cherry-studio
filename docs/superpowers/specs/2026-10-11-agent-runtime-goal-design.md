@@ -215,11 +215,11 @@ Summarize what is done, what is verified, and what remains, then stop.
 
 只记 goal 轮里的 turn：从轮被接纳（6.3）起，到下一个人类回合开始或本次运行结束为止。人类回合开始时（用户消息的 `message_end`；Pi 在 `turn_start` 之后才把消息写进 branch，所以不能在 `turn_start` 读 branch 判断）清零无进展计数和 blocked 计数（7.2、7.5），这个回合的用量和工具调用不计入 goal。
 
-每个 turn 结束时记录（只在内存里，随快照持久化的只有累计 token）：
+每个 turn 结束时记录（只在内存里，随快照持久化的只有累计 token）；用量（下面第二、三条）不等 turn 结束，每条 assistant 消息、每个工具结果的 `message_end` 就计入，且只在目标仍为 `active` 时计入：工具调用让 goal 停下时，发出这次调用的请求已经算进停止快照，停下之后的请求（`complete` 之后的总结）一律不计：
 
 - `progress`：按轮计，一轮里任一 turn 满足即算有进展：有成功的非只读工具调用（`toolResults` 里存在 `isError !== true` 且工具不在集合 `read / grep / find / ls / tool_search / vcc_recall / get_goal / todo_write / AskUserQuestion` 中的结果），或这一轮最后一条带文字的 assistant 回复与上一轮的归一化后不同。只调工具、没有文字的 turn 不更新"上一轮的文字"。`todo_write` 和 `AskUserQuestion` 不算进展，否则只改 todo 或只提问的轮会绕过无进展检测。
 - `tokensUsed += usage.input + usage.output + usage.cacheRead + usage.cacheWrite`；`costUsed += usage.cost.total`（L1 在 `toPiUsage` 里用模型的 `cost` 单价算出，无定价时为 0）。
-- 工具自带的用量：`event.toolResults` 里每个带 `usage` 的结果再加 `tokensUsed += usage.totalTokens`、`costUsed += usage.cost.total`。不认工具名：目前只有 `subagent` 带 usage（L4 把子代理各次回复的用量之和放在 `AgentToolResult.usage` 上，Pi 把它带到 toolResult 消息和 `turn_end` 的 `toolResults`），以后别的工具带上 usage 也会被计入。宿主已为子代理的每次请求记过账，这里只计入 goal 预算，不重复计费。
+- 工具自带的用量：每个带 `usage` 的工具结果再加 `tokensUsed += usage.totalTokens`、`costUsed += usage.cost.total`。不认工具名：目前只有 `subagent` 带 usage（L4 把子代理各次回复的用量之和放在 `AgentToolResult.usage` 上，Pi 把它带到 toolResult 消息和 `turn_end` 的 `toolResults`），以后别的工具带上 usage 也会被计入。宿主已为子代理的每次请求记过账，这里只计入 goal 预算，不重复计费。
 - `truncated`：assistant `stopReason === 'length'`。
 
 ### 6.2 `agent_before_settle`：按顺序判断
@@ -509,3 +509,4 @@ L4（前台子代理，PR #21578）已完成，L5 基于它实现：包内任务
 2026-10-15，按 PR #21607 的评审修订：
 
 1. 运行中把轮数上限调低到已开的轮数（例如第 1 轮里 `/goal rounds 1`）时，settle 直接 `round_limit` 停下，不再预约一轮 wrap-up（6.2 第 10 条）。
+2. 用量在每条 assistant 消息和工具结果的 `message_end` 计入，只在目标仍为 `active` 时计入（6.1）：`update_goal` 让 goal 停下时，发出这次调用的请求在停止快照里，重建后的 `/goal resume` 不会越过已经用完的预算；停下之后的请求不计。
