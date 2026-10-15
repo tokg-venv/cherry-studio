@@ -1,6 +1,6 @@
 # Agent runtime goal 设计
 
-状态：已实现（任务 1–11）· 2026-10-11，2026-10-13 按 L4 子代理修订、按全分支评审修订 · 基于 L4（PR #21578）
+状态：已实现（任务 1–11）· 2026-10-11，2026-10-13 按 L4 子代理修订、按全分支评审修订，2026-10-15 按 PR 评审修订（见第 16 节） · 基于 L4（PR #21578）
 
 ## 1. 背景与目标
 
@@ -244,7 +244,8 @@ Summarize what is done, what is verified, and what remains, then stop.
 8. port.hasRunningSubagents?.() === true        → phase=blocked, code=waiting_subagents；不续跑
 9. 无进展计数 ≥ 3                               → phase=blocked, code=no_progress；不续跑
 10. 预算判断：
-    wrapUpDone                                 → phase=blocked, code=round_limit（轮数已到上限）
+    wrapUpDone，或 roundsStarted ≥ maxGoalRounds（运行中把上限调低到已开的轮数，没有余量再收尾）
+                                               → phase=blocked, code=round_limit（轮数已到上限）
                                                  或 budget_exhausted（其余情况）；不续跑
     roundsStarted + 1 ≥ maxGoalRounds
       或 tokensUsed ≥ budget.tokens
@@ -502,3 +503,9 @@ interface GoalPort {
 ## 15. 实施顺序
 
 L4（前台子代理，PR #21578）已完成，L5 基于它实现：包内任务 1–11 已全部实现，分支已 rebase 到 L4 上。宿主接入（UI、命令入口、审批策略与权限模式、plan 模式下不续跑、遥测）在接入 PR 里做；`hasRunningSubagents` 等 L6。
+
+## 16. 修订记录
+
+2026-10-15，按 PR #21607 的评审修订：
+
+1. 运行中把轮数上限调低到已开的轮数（例如第 1 轮里 `/goal rounds 1`）时，settle 直接 `round_limit` 停下，不再预约一轮 wrap-up（6.2 第 10 条）。
