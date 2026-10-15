@@ -271,7 +271,7 @@ Pi 的处理器按加载顺序串行组合，后加载的扩展可以覆盖 `ent
   - 在 `agent_before_settle` 返回 `{ entries, continue: true }` 续跑的轮：Pi 在 `agent_start` / `turn_start` 之前就把 round 消息写进 branch，而且扩展收不到它的 `message_end`；所以在下一个 `turn_start` 找 branch 上最后一条 message 条目之后的 round 消息（其他扩展在同一次边界里追加的条目可能排在它后面，跳过）。
   两种情况下，`details` 与预约一致则追加快照 `roundsStarted + 1`（wrap-up 轮同时置 `wrapUpDone = true`），清空预约。`edit` 调高 `maxGoalRounds` 或 `budget`、且调高后有余量时，把 `wrapUpDone` 重置为 `false`，触顶后的目标才能再次续跑。
 - 若先到的是 `agent_settled`：预约作废，追加快照 `phase = 'blocked'`、`lastStop = continuation_rejected`（与 5.2 一致），`armed = false`。宿主据此在 UI 上提示"续跑被拒绝"。
-- Pi 不论是否续跑都会提交边界条目，所以被否决（或 settle 时中止、崩溃）的轮消息留在 branch 上。`context` 处理器把它从之后的每次请求里去掉：一条轮消息算跑过，当且仅当它之前的那条快照（命令开的轮）或它之后的第一条快照（settle 开的轮）的 `roundsStarted` 达到它的轮号。判断只读 branch，重建的 session 发出的请求与 live 一致；transcript 里照样保留这条消息。
+- Pi 不论是否续跑都会提交边界条目，所以被否决（或 settle 时中止、崩溃）的轮消息留在 branch 上。`context` 处理器把它从之后的每次模型请求里去掉，交给 verifier 的 `messages` 也去掉；压缩摘要器（L2）的输入不过滤，仍能看到它：一条轮消息算跑过，当且仅当它之前的那条快照（命令开的轮）或它之后的第一条快照（settle 开的轮）的 `roundsStarted` 达到它的轮号。判断只读 branch，重建的 session 发出的请求与 live 一致；transcript 里照样保留这条消息。已知缺口：settle 提交轮消息之后、这一轮开始之前崩溃，重建后对仍为 `active` 的目标 `/goal resume` 不写快照，新预约与旧轮同 revision、同轮号，两条 key 相同，新轮被接纳后旧条目也算跑过，两条提示会一起出现在请求里。
 
 这和 DSH 的"只有被接纳的 goal 消息才推进轮数"一致。
 
@@ -517,3 +517,4 @@ L4（前台子代理，PR #21578）已完成，L5 基于它实现：包内任务
 2026-10-16，按修复评审修订：
 
 4. 工具结果的用量按调用开始时是否在 goal 轮里计（6.1）：`/goal pause` 时还在跑的前台子代理，返回后它的用量立即写进快照，`/goal resume` 不会越过它用掉的预算。3.1 节、第 4 节事件表和 6.1 标题里"`turn_end` 记账"的说法同步改为 `message_end`。
+5. 未接纳的轮消息也不进 verifier 的 `messages`（6.3）；压缩摘要器的输入、崩溃后同 key 的情形记为已知缺口。
