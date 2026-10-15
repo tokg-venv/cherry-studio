@@ -113,11 +113,12 @@ host session because it is also the prompt-cache routing key.
 ## Compaction
 
 Pi's native compaction runs, configured by `compaction: { reserveTokens, keepRecentTokens,
-enabled?, summarize? }`: it compacts once the context passes `contextWindow - reserveTokens` (also
-mid-turn, before the next model request) and compacts and retries once when a request overflows.
-The host computes both numbers from its own settings. Without `summarize`, Pi's default summarizer
-runs on the session model through the port. With it, the host summarizes with its own prompt and
-model: `summarize({ sessionId, reason, messages, previousSummary, instructions, signal })` receives
+enabled?, summarize? }`: it compacts once the context passes `contextWindow - reserveTokens` (before
+any run starts, a notification's or a command's included, and mid-turn, before the next model
+request) and compacts and retries once when a request overflows. The host computes both numbers
+from its own settings. Without `summarize`, Pi's default summarizer runs on the session model
+through the port and leaves thinking out of what it summarizes. With it, the host summarizes with
+its own prompt and model: `summarize({ sessionId, reason, messages, previousSummary, instructions, signal })` receives
 the compacting session's `sessionId` (a subagent's is the id `SubagentPort.configure` received, so a
 host can tell its compaction from its parent's) and the folded messages as AI SDK messages, after the session model's replay rules (failed replies left out, tool
 calls without a result answered), so they can be sent as they are, and returns the summary text, which is stored as is; Pi frames it when it
@@ -160,7 +161,9 @@ fork?, background?, model? })` with DSH's name, so Cherry's renderer shows it as
 Each `subagent` call builds a session in-process from the parent's options (port, request options,
 model, prompts, tools, compaction, offload, recall, settings) plus the extensions the host returns
 from `SubagentPort.configure(subagent)`, and starts it with `session.prompt()` so
-`before_agent_start` handlers run as in any turn. It shares the parent's `sideChannel`, told apart by
+`before_agent_start` handlers run as in any turn. A continuation run (`message_subagent`) starts
+with a custom message, so those handlers see it with `messageType: 'custom'`; one that should act
+only on prompts checks `messageType === 'user'`. It shares the parent's `sideChannel`, told apart by
 the request `sessionId`; the parent's `extensionFactories` and `onEvent` are not inherited. Its
 session id is a random UUID: the id the model addresses it by and the key the host stores it under.
 A run makes at most 200 model requests, counted where its session makes them: its turns and the
@@ -186,12 +189,12 @@ none of the three tools; a fork keeps them, so its tools match the parent's, and
   as it settles, or, when the parent is idle, as the start of a new run, which the host shows as an
   autonomous turn (`background-work`). Never in the middle of a run; a queued user message goes
   first, and results that end together go in one message. After the user stops a turn, nothing
-  starts on its own until their next prompt, which pending results ride with (a goal aborting a
-  run to withdraw a stale round is no such stop, unless the user's `abort()` lands in that run). Results that start no
-  run (the user's stops, those a rebuild restores) ride with the next notification or prompt, or are
-  merged as a run no prompt started (a command's, such as `/goal resume`) settles. A report over the
-  offload threshold (20,000 characters without offload) is saved through the offload store, or cut
-  to its head and tail.
+  starts on its own until a new run starts (their next prompt or a command such as `/goal resume`),
+  and pending results ride with that run's start (a goal aborting a run to withdraw a stale round is
+  no such stop, unless the user's `abort()` lands in that run). Results that start no run (the
+  user's stops, those a rebuild restores) ride with the start of the next run, or with a settle that
+  merges a result that does start one. A report over the offload threshold (20,000 characters
+  without offload) is saved through the offload store, or cut to its head and tail.
 - **Messages** – `message_subagent` queues a message for a running subagent: it reads it after its
   current tool batch, and one that comes as it settles starts its next run in the same session.
   For a finished subagent it loads the stored transcript (`SubagentPort.load`), configures the
@@ -235,9 +238,9 @@ its outcome, result and usage), never sent to the model, and `onEvent` gets
 `{ type: 'subagents', subagents: SubagentView[] }` after each change. A rebuilt parent restores its
 subagents from them and from `subagent` results: a run whose last snapshot is `running` was cut off
 (`interrupted`) and can be continued; such runs, and every run's result that never reached the
-parent, ride with the user's next message (or the settle of a turn a command starts), once. After a
-compaction a `cherry.subagent-status` message lists the background subagents still running and the
-results not delivered yet.
+parent, ride with the start of the next run (the user's next message or a command's), once. After
+a compaction a `cherry.subagent-status` message lists the background subagents still running and
+the results not delivered yet.
 
 A subagent's `onEvent` receives its whole transcript: the first `transcript-append` holds its start
 entries, the forked prefix and a `cherry.subagent-origin` state entry
@@ -246,15 +249,16 @@ per `sessionId` to implement `load`. `onSessionCreated` receives the live sessio
 request. `AskUserQuestion` ends as `unavailable` inside a subagent without asking the port.
 
 Host contract: start user turns with `AgentRuntimeSession.prompt` and manual compactions with
-`compact`, never `session.prompt` or `session.compact` directly (Pi reports a preparing prompt as
-idle, and a notification run would collide with it); stop the user's turn with `abort()`, which
-counts as the user's stop even when it lands in a run the runtime is ending itself (a goal
-withdrawing a round), where a bare `session.abort()` is taken for the runtime's; do not dispose or
-rebuild the parent while background subagents run. A host that stops a turn through its own request
-signal needs nothing more: that abort ends a request, and a withdrawn round makes none. A `prompt`
-or `compact` called while a run settles (from `onEvent`'s `turn-complete`, where Pi itself would
-defer it and return at once) waits until that settle and any run Pi started during it are over,
-then runs, and resolves or rejects as it does.
+`compact`, never `session.prompt` or `session.compact` directly (Pi reports the session idle while
+a prompt runs its commands and `input` handlers and before a manual compaction starts, and a
+notification run would collide with them); stop the user's turn with `abort()`, which counts as the
+user's stop even when it lands in a run the runtime is ending itself (a goal withdrawing a round),
+where a bare `session.abort()` is taken for the runtime's; do not dispose or rebuild the parent
+while background subagents run. A host that stops a turn through its own request signal needs
+nothing more: that abort ends a request, and a withdrawn round makes none. A `prompt` or `compact`
+called while a run settles (from `onEvent`'s `turn-complete`, where Pi itself would defer it and
+return at once) waits until that settle and any run Pi started during it are over, then runs, and
+resolves or rejects as it does.
 
 ## Extensions
 
