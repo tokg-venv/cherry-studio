@@ -1377,29 +1377,43 @@ describe('PiRuntimeConnection', () => {
     expect(boundaryIndex).toBeLessThan(chunkIndex)
   })
 
-  it("emits steer-boundary at the steer's message, not at the prompt of a run that is still starting", async () => {
-    mocks.isStreaming = true
+  // Breaks when a steer accepted while a run starts (pi 1.2 streams from the start, e.g. during a
+  // startup compaction) is matched to a later user message by its text: identical redirects, or the
+  // run's own re-queued reminder prompt, then consume each other's boundaries.
+  it('queues redirects until the run it started has sent its prompt, then delivers steers in order', async () => {
+    let settlePrompt!: () => void
+    mocks.prompt.mockImplementationOnce(() => new Promise<void>((resolve) => (settlePrompt = resolve)))
     const conn = await new PiRuntimeConnection(input).start()
-    const steer = userInput('new direction')
-    expect(conn.redirect(steer)).toBe(true)
     const cb = mocks.subscribeCb!
     const iter = conn.events[Symbol.asyncIterator]()
     let next = iter.next()
-    const emittedTypes = async () => {
-      const types: string[] = []
+    const emitted = async () => {
+      const out: AgentRuntimeEvent[] = []
       for (;;) {
         const result = await Promise.race([next, new Promise<undefined>((resolve) => setTimeout(resolve, 20))])
-        if (!result || result.done) return types
-        types.push(result.value.type)
+        if (!result || result.done) return out
+        out.push(result.value)
         next = iter.next()
       }
     }
 
-    // pi streams from the run's start, so the run's own prompt can come before the steer it accepted.
-    cb(userMessageStart('the prompt that started the run'))
-    expect(await emittedTypes()).not.toContain('steer-boundary')
+    conn.send(userInput('same words', true))
+    mocks.isStreaming = true
+    expect(conn.redirect(userInput('same words'))).toBe(false)
+    expect(conn.redirect(userInput('same words'))).toBe(false)
+    expect(mocks.steer).not.toHaveBeenCalled()
+
+    cb(userMessageStart(mocks.prompt.mock.calls[0][0] as string))
+    expect((await emitted()).map((event) => event.type)).not.toContain('steer-boundary')
+    const first = userInput('same words')
+    const second = { ...userInput('same words'), message: { ...userInput('same words').message, id: 'msg-again' } }
+    expect(conn.redirect(first)).toBe(true)
+    expect(conn.redirect(second)).toBe(true)
     cb(userMessageStart(mocks.steer.mock.calls[0][0]))
-    expect(await emittedTypes()).toEqual(['steer-boundary'])
+    expect(await emitted()).toEqual([{ type: 'steer-boundary', inputs: [first] }])
+    cb(userMessageStart(mocks.steer.mock.calls[1][0]))
+    expect(await emitted()).toEqual([{ type: 'steer-boundary', inputs: [second] }])
+    settlePrompt()
   })
 
   it('emits undelivered steers before turn-complete when the turn ends first', async () => {
