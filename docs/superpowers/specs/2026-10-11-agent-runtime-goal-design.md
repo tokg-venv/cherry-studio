@@ -85,7 +85,7 @@ packages/agent-runtime/tests/goal*.test.ts
 | `tool_call` | 轮内重复工具调用的检测（见 7.2） |
 | `turn_end` | 记账：本轮是否有进展、是否有待处理的停止请求 |
 | `agent_before_settle` | 唯一的续跑决策点（见 6） |
-| `turn_start` / `message_end` | 确认续跑被接纳（见 6.3：命令开的轮看 round 消息的 `message_end`，在 `agent_before_settle` 续跑的轮看下一个 `turn_start` 时 branch 上最后一条 message 条目之后的 round 消息，其他扩展追加的条目跳过）；用户消息的 `message_end`：标记人类回合开始（见 6.1） |
+| `turn_start` / `message_end` | 确认续跑被接纳，并在此刻按当前目标重新校验预约（见 6.3：命令开的轮看 round 消息的 `message_end`，在 `agent_before_settle` 续跑的轮看下一个 `turn_start` 时 branch 上最后一条 message 条目之后的 round 消息，其他扩展追加的条目跳过）；用户消息的 `message_end`：标记人类回合开始（见 6.1） |
 | `agent_settled` | 清理未被接纳的预约（记 `continuation_rejected`）；运行被中止时把 `active` 且已武装的目标记为 `paused / aborted`（见 7.6）；不做任何续跑 |
 
 宿主侧没有新的 IPC 或 DataApi：goal 的全部状态通过 L2 的 `cherry.goal` 状态条目进入 transcript，宿主按已有的 `transcript-append` 事件存储和渲染。
@@ -278,6 +278,8 @@ Pi 的处理器按加载顺序串行组合，后加载的扩展可以覆盖 `ent
   两种情况下，`details` 与预约一致则追加快照 `roundsStarted + 1`（wrap-up 轮同时置 `wrapUpDone = true`），清空预约。`edit` 调高 `maxGoalRounds` 或 `budget`、且调高后有余量时，把 `wrapUpDone` 重置为 `false`，触顶后的目标才能再次续跑。
 - 若先到的是 `agent_settled`：预约作废，追加快照 `phase = 'blocked'`、`lastStop = continuation_rejected`（与 5.2 一致），`armed = false`。宿主据此在 UI 上提示"续跑被拒绝"。
 - Pi 不论是否续跑都会提交边界条目，所以被否决（或 settle 时中止、崩溃）的轮消息留在 branch 上。`context` 处理器把它从之后的每次模型请求里去掉，交给 verifier 的 `messages` 也去掉；压缩摘要器（L2）的输入不过滤，仍能看到它：一条轮消息算跑过，当且仅当它之前的那条快照（命令开的轮）或它之后的第一条快照（settle 开的轮）的 `roundsStarted` 达到它的轮号。判断只读 branch，重建的 session 发出的请求与 live 一致；transcript 里照样保留这条消息。已知缺口：settle 提交轮消息之后、这一轮开始之前崩溃，重建后对仍为 `active` 的目标 `/goal resume` 不写快照，新预约与旧轮同 revision、同轮号，两条 key 相同，新轮被接纳后旧条目也算跑过，两条提示会一起出现在请求里。
+
+- 预约到接纳之间目标可能变了：settle 里 goal 预约了下一轮，后加载扩展的 settle 处理器还在等待时，用户执行了 `/goal rounds 1`（或 edit、pause、clear）。接纳前按当前目标重新校验（同一 revision、`active` 且已武装、轮号仍是 `roundsStarted + 1`、未超上限、非收尾轮时预算未用完）；不再成立就撤回这一轮：不计轮数，在请求发出前 `ctx.abort()`（桥不会把已中止的请求交给端口），轮消息留在 branch 上按未接纳处理。随后的 `agent_settled` 认出这是自己的撤回，不记 `aborted`，而是按当前目标继续：已到上限就以 `round_limit` / `budget_exhausted` 停下，否则开一轮新的（新 revision）；目标已不是 `active` 或未武装就什么都不做。
 
 这和 DSH 的"只有被接纳的 goal 消息才推进轮数"一致。
 
@@ -528,3 +530,4 @@ L4（前台子代理，PR #21578）已完成，L5 基于它实现：包内任务
 2026-10-16，按 PR #21607 第二轮评审修订（用量改为 branch 的纯函数）：
 
 6. 用量不再在内存里累计、也不以快照为准（5.1、6.1）：`goalUsage(branch, goalId)` 每次从 branch 算出，live 与重建一致；请求在停下前一律计入，工具结果的用量跟着发出调用的请求走。快照的 `tokensUsed` / `costUsed` 改为写入时的记录值。原来"请求结束、工具还没返回时重建会丢掉这次请求的用量"的问题随之消失；"工具结果到达时 goal 已停就单独写快照"的做法删除。快照新增 `armed`，`session_start` 对已武装的恢复目标写一条解除武装的快照（11）。轮中途停下时，停止快照带上到停下为止的进展（3.1 第 12 条）。
+7. 预约的续跑在接纳前按当前目标重新校验，过期的在请求发出前撤回（6.3）：后加载扩展的 settle 处理器等待期间执行的 `/goal rounds 1` 不再让第 2 轮发出请求。
