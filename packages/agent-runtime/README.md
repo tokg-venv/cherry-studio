@@ -325,12 +325,13 @@ handles.
   The budget also counts the `usage` a tool result carries, so a
   `subagent` call's requests count toward it. While background subagents run, an armed goal waits
   (no round, no stop; `/goal` shows `Waiting for N background subagents`) and goes on after their
-  notification's turn settles. That turn is neither a human turn nor a goal round; while the goal
-  is armed its usage counts toward the budget, and so does the usage of every run of a subagent the
-  goal's rounds launched, moved or continued in the background, once its notification is delivered
-  or the model stops it, whether the goal is running then or not (disarmed, paused or blocked).
-  Once the budget is used up, background launches fail and the goal's running
-  background subagents stop. `port.onApproval` events of other sessions (by `sessionId`, or calls not
+  notification's turn settles. That turn is neither a human turn nor a goal round (a notification
+  that rides with a person's message or a round's start belongs to that turn); while the goal is
+  armed its usage counts toward the budget. So does each background run the goal's rounds launched,
+  moved or continued (a later run another turn continues is not the goal's): once, when its result
+  reaches the model (its notification or a `stop_subagent` result; overlapping stops report one
+  run), whether the goal is running then or not (disarmed, paused or blocked). Once the budget is
+  used up, background launches fail and the goal's running background subagents stop. `port.onApproval` events of other sessions (by `sessionId`, or calls not
   executing in this session when an event has none) are ignored. When `port.modelSupportsTools()`
   is false, no tools or command are registered and an active goal is blocked with
   `unsupported_model`. In a subagent's session the goal tools fail with `in_subagent`, nothing
