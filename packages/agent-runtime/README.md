@@ -69,7 +69,8 @@ opt in to workspace `AGENTS.md` / `CLAUDE.md` context files and to explicit skil
 Cherry's current Pi runtime does. `dispose()` aborts the running turn, emits `session_shutdown` to
 extensions and disposes the session. `prompt()` and `compact()` wrap `session.prompt` and
 `session.compact`; the host starts every user turn and manual compaction through them (see
-Subagents). `stopSubagent()` and `backgroundSubagent()` are the user's controls for subagents.
+Subagents). `abort()` wraps `session.abort()` and is the user's stop (see Subagents).
+`stopSubagent()` and `backgroundSubagent()` are the user's controls for subagents.
 
 ## Transcript
 
@@ -186,7 +187,7 @@ none of the three tools; a fork keeps them, so its tools match the parent's, and
   autonomous turn (`background-work`). Never in the middle of a run; a queued user message goes
   first, and results that end together go in one message. After the user stops a turn, nothing
   starts on its own until their next prompt, which pending results ride with (a goal aborting a
-  run to withdraw a stale round is no such stop). Results that start no
+  run to withdraw a stale round is no such stop, unless the user's `abort()` lands in that run). Results that start no
   run (the user's stops, those a rebuild restores) ride with the next notification or prompt, or are
   merged as a run no prompt started (a command's, such as `/goal resume`) settles. A report over the
   offload threshold (20,000 characters without offload) is saved through the offload store, or cut
@@ -246,10 +247,14 @@ request. `AskUserQuestion` ends as `unavailable` inside a subagent without askin
 
 Host contract: start user turns with `AgentRuntimeSession.prompt` and manual compactions with
 `compact`, never `session.prompt` or `session.compact` directly (Pi reports a preparing prompt as
-idle, and a notification run would collide with it); do not dispose or rebuild the parent while
-background subagents run. A `prompt` or `compact` called while a run settles (from `onEvent`'s
-`turn-complete`, where Pi itself would defer it and return at once) waits until that settle and any
-run Pi started during it are over, then runs, and resolves or rejects as it does.
+idle, and a notification run would collide with it); stop the user's turn with `abort()`, which
+counts as the user's stop even when it lands in a run the runtime is ending itself (a goal
+withdrawing a round), where a bare `session.abort()` is taken for the runtime's; do not dispose or
+rebuild the parent while background subagents run. A host that stops a turn through its own request
+signal needs nothing more: that abort ends a request, and a withdrawn round makes none. A `prompt`
+or `compact` called while a run settles (from `onEvent`'s `turn-complete`, where Pi itself would
+defer it and return at once) waits until that settle and any run Pi started during it are over,
+then runs, and resolves or rejects as it does.
 
 ## Extensions
 
@@ -287,8 +292,8 @@ handles.
   (two rounds hint, three stop; the same tool call three times in
   a row within a round is blocked, five times ends the goal), a denied approval, an approval nobody
   can give or a dismissed question in a goal round, a round another extension's settle handler
-  overrides, and a failed request or an abort (`session.abort()` or the host's own request signal)
-  while the goal is armed. Usage is never
+  overrides, and a failed request or an abort (`abort()`, `session.abort()` or the host's own
+  request signal) while the goal is armed. Usage is never
   kept: every check (the budget, `resume`, `/goal`, `get_goal`) reads it from the transcript, so a
   rebuilt session sees what the live one saw. It is every request made in one of the goal's
   admitted rounds while the goal was active, the request whose tool call stopped it included and
@@ -382,8 +387,6 @@ on its own.
   (OpenAI's `prompt_cache_key`) does not reach the parent's cache partition.
 - Goals: no fresh-context (Ralph) mode. The package does not know the permission mode; keeping
   goals from running rounds in plan mode is up to the host.
-- A `session.abort()` that lands in the run withdrawing a stale goal round (it ends before any
-  request) is taken for that withdrawal: the goal goes on instead of pausing.
 - Every fork stores the parent's prefix in its own transcript; a host may deduplicate it.
 - A background result reaches a busy parent only when its run settles, after the whole turn.
 - Shutdown writes no snapshots for the runs it cuts off, so a rebuilt parent cannot tell a closed
