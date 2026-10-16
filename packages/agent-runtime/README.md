@@ -185,7 +185,8 @@ none of the three tools; a fork keeps them, so its tools match the parent's, and
   as it settles, or, when the parent is idle, as the start of a new run, which the host shows as an
   autonomous turn (`background-work`). Never in the middle of a run; a queued user message goes
   first, and results that end together go in one message. After the user stops a turn, nothing
-  starts on its own until their next prompt, which pending results ride with. Results that start no
+  starts on its own until their next prompt, which pending results ride with (a goal aborting a
+  run to withdraw a stale round is no such stop). Results that start no
   run (the user's stops, those a rebuild restores) ride with the next notification or prompt, or are
   merged as a run no prompt started (a command's, such as `/goal resume`) settles. A report over the
   offload threshold (20,000 characters without offload) is saved through the offload store, or cut
