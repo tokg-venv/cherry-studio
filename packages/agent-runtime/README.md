@@ -206,8 +206,11 @@ none of the three tools; a fork keeps them, so its tools match the parent's, and
   `{ sessionId, stopped: true, run, usage }` with the stopped run's usage, or
   `{ sessionId, stopped: false }`. `stopSubagent(sessionId)` is the user's stop button for a
   background subagent: the parent hears of it only with its next message, and it cannot be
-  continued. Disposing the parent stops and disposes every subagent session; a run that had ended
-  on its own by then keeps its result, which the rebuilt parent delivers.
+  continued. The user's stop is recorded when it is accepted (a `cherry.subagent-state` snapshot
+  with `stoppedBy: 'user'` while the run winds down), so a parent rebuilt after closing meanwhile
+  still refuses to continue that run and reports it as stopped by the user. Disposing the parent
+  stops and disposes every subagent session; a run that had ended on its own by then keeps its
+  result, which the rebuilt parent delivers.
 
 With `SubagentPort.findModels`, `subagent` takes a `model` the user named: the package resolves it
 among the exact candidates the host finds (none or several fail and tell the model what to ask) and
