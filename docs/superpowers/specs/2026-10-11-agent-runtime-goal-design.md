@@ -38,7 +38,7 @@ Cherry 正把 Pi 做成唯一的 agent runtime（L1 #21436 桥接、L2 #21437 tr
 全部不依赖模型配合：
 
 1. 目标对象与状态机（沿用 DSH：`active / paused / blocked / complete`，revision 做 compare-and-set）。
-2. 续跑决策只在 `agent_before_settle` 做；用量在每条消息的 `message_end` 记账，进展在 `turn_end` 记账；`agent_settled` 不续跑。
+2. 续跑决策只在 `agent_before_settle` 做；用量不记账，每次需要时从 branch 算出（6.1），进展在 `turn_end` 记账；`agent_settled` 不续跑。
 3. 运行时硬停止：每个 goal 的轮数上限（默认由宿主给）、宿主级绝对上限、可选预算（token 数或金额）。触顶前给一次收尾轮。
 4. 停止压过续跑：中止、暂停、清除立即生效；三者在 UI 上是三个操作。
 5. "需要人"即停：自主轮里审批被拒、用户关掉提问、或处于无人值守 → 停下并给出原因码。
@@ -48,7 +48,7 @@ Cherry 正把 Pi 做成唯一的 agent runtime（L1 #21436 桥接、L2 #21437 tr
 9. 自主等级：`auto`（空闲即续）和 `confirm-each-round`（每轮结束停下等用户）。
 10. 模型创建目标需用户确认（通过宿主的审批策略实现，包内无代码）。
 11. 完成核验端口 `GoalVerifier`；宿主未实现时退化为运行时检查。
-12. 每次停止都写入原因码和统计（轮数、token、时长）。统计截至停止那一刻：同一轮里停止之后的请求（例如 `complete` 之后的总结）不在这条快照里。
+12. 每次停止都写入原因码和统计（轮数、token、时长）。统计截至停止那一刻：同一轮里停止之后的请求（例如 `complete` 之后的总结）不在这条快照里。快照里的 token 和金额是写入时从 branch 算出的值，只作记录，运行时从不读回。
 
 ### 3.2 二期（质量）
 
@@ -80,13 +80,12 @@ packages/agent-runtime/tests/goal*.test.ts
 
 | 事件 | 用途 |
 |---|---|
-| `session_start` | 从 branch 上最后一条 `cherry.goal` 状态条目恢复目标；`armed = false`；订阅 `port.onApproval`（见 7.3） |
+| `session_start` | 从 branch 上最后一条 `cherry.goal` 状态条目恢复目标；恢复的目标若已武装，写一条 `armed: false` 的快照（不升 revision，见 11）；订阅 `port.onApproval`（见 7.3） |
 | `session_shutdown` | 退订 `port.onApproval` |
 | `tool_call` | 轮内重复工具调用的检测（见 7.2） |
 | `turn_end` | 记账：本轮是否有进展、是否有待处理的停止请求 |
-| `tool_execution_start` | 记下 goal 轮里开始的工具调用，它的结果按开始时的轮计用量（见 6.1） |
 | `agent_before_settle` | 唯一的续跑决策点（见 6） |
-| `turn_start` / `message_end` | assistant 消息和工具结果的 `message_end`：累计 token（见 6.1）；确认续跑被接纳（见 6.3：命令开的轮看 round 消息的 `message_end`，在 `agent_before_settle` 续跑的轮看下一个 `turn_start` 时 branch 上最后一条 message 条目之后的 round 消息，其他扩展追加的条目跳过）；用户消息的 `message_end`：标记人类回合开始（见 6.1） |
+| `turn_start` / `message_end` | 确认续跑被接纳（见 6.3：命令开的轮看 round 消息的 `message_end`，在 `agent_before_settle` 续跑的轮看下一个 `turn_start` 时 branch 上最后一条 message 条目之后的 round 消息，其他扩展追加的条目跳过）；用户消息的 `message_end`：标记人类回合开始（见 6.1） |
 | `agent_settled` | 清理未被接纳的预约（记 `continuation_rejected`）；运行被中止时把 `active` 且已武装的目标记为 `paused / aborted`（见 7.6）；不做任何续跑 |
 
 宿主侧没有新的 IPC 或 DataApi：goal 的全部状态通过 L2 的 `cherry.goal` 状态条目进入 transcript，宿主按已有的 `transcript-append` 事件存储和渲染。
@@ -107,9 +106,10 @@ interface GoalSnapshot {
   progressRounds: number     // 有进展的轮数（见 6.1）；无核验端口时 complete 的退化检查读它
   maxGoalRounds: number      // 本 goal 的轮数上限
   budget?: { tokens?: number; usd?: number }   // 本 goal 的预算，任一项越过即触发
-  tokensUsed: number         // input + output + cacheRead + cacheWrite 之和，加上工具结果自带的 usage（见 6.1）
-  costUsed: number           // Pi 的 usage.cost.total 累计（L1 已把模型定价传给 Pi），同样加上工具结果的；无定价的模型恒为 0
+  tokensUsed: number         // 写入时 6.1 的用量（input + output + cacheRead + cacheWrite，加上工具结果自带的 usage），只给宿主展示
+  costUsed: number           // 同上，按条目自带的 cost（transcript 的 usage.cost，即 Pi 的 usage.cost.total）；无定价的模型恒为 0
   wrapUpDone: boolean        // 收尾轮是否已经跑过
+  armed: boolean             // goal 是否在驱动会话：创建、resume 置位；每次停止、恢复会话（session_start）清除；只改它不升 revision
   lastStop?: { code: GoalStopCode; message?: string; at: number }
   createdAt: number
   updatedAt: number
@@ -212,15 +212,21 @@ Summarize what is done, what is verified, and what remains, then stop.
 
 三种入口发出的第一轮都走 6.3 的预约与接纳，轮数同样只在被接纳后递增。
 
-### 6.1 记账：`message_end` 计用量，`turn_end` 计进展
+### 6.1 用量从 branch 算出，`turn_end` 计进展
 
 只记 goal 轮里的 turn：从轮被接纳（6.3）起，到下一个人类回合开始或本次运行结束为止。人类回合开始时（用户消息的 `message_end`；Pi 在 `turn_start` 之后才把消息写进 branch，所以不能在 `turn_start` 读 branch 判断）清零无进展计数和 blocked 计数（7.2、7.5），这个回合的用量和工具调用不计入 goal。
 
-每个 turn 结束时记录（只在内存里，随快照持久化的只有累计 token）；用量（下面第二、三条）不等 turn 结束：assistant 消息在自己的 `message_end` 计入，且只在目标仍为 `active` 时计入，所以工具调用让 goal 停下时，发出这次调用的请求已经算进停止快照，停下之后的请求（`complete` 之后的总结）一律不计；工具结果按调用开始（`tool_execution_start`）时是否在 goal 轮里决定计不计，结果到达时 goal 已经停下（例如前台子代理运行中执行了 `/goal pause`），这笔用量立即单独写一条快照（不升 revision），`/goal resume` 的余量判断能看到它：
+用量不在内存里累计，也不以快照为准：每次需要（settle 的预算判断、`resume` 的余量、`/goal` 状态、`get_goal` 输出、写快照）都由同一个函数 `goalUsage(branch, goalId)` 从 branch 算出。branch 上的每条条目自带用量（assistant 条目的 `usage` 和 L2 存下的 `cost`，工具结果的 `usage`），live 和重建后的 session 读同一份 branch，结果一致。计入规则只看 branch：
+
+- 一条 assistant 条目计入 goal G，当且仅当它位于 G 被接纳的某一轮里（从这一轮的 round 消息起，到下一条用户消息、下一条 round 消息或另一个目标的快照为止；没被接纳的 round 消息不开轮，见 6.3），且它之前最近的一条快照是 G、`phase` 为 `active`。所以工具调用让 goal 停下时，发出这次调用的请求在停止之前，计入；停下之后的请求（`complete` 之后的总结）一律不计。
+- 一条工具结果自带的 usage 跟着发出这次调用的请求走：那条 assistant 条目计入 G，它就计入 G。前台子代理运行中执行了 `/goal pause`，它返回后照样计入，`/goal resume` 的余量判断能看到。
+- 快照里的 `tokensUsed` / `costUsed` 是写入那一刻算出的值，供宿主展示和遥测（3.1 第 12 条），运行时不读回。
+
+每个 turn 结束时记录进展（只在内存里，随下一条快照持久化；settle 时没有别的快照要写，例如让路给排队的用户消息，就立即写一条；轮中途停下时，到停下为止的进展写进停止快照）：
 
 - `progress`：按轮计，一轮里任一 turn 满足即算有进展：有成功的非只读工具调用（`toolResults` 里存在 `isError !== true` 且工具不在集合 `read / grep / find / ls / tool_search / vcc_recall / get_goal / todo_write / AskUserQuestion` 中的结果），或这一轮最后一条带文字的 assistant 回复与上一轮的归一化后不同。只调工具、没有文字的 turn 不更新"上一轮的文字"。`todo_write` 和 `AskUserQuestion` 不算进展，否则只改 todo 或只提问的轮会绕过无进展检测。
-- `tokensUsed += usage.input + usage.output + usage.cacheRead + usage.cacheWrite`；`costUsed += usage.cost.total`（L1 在 `toPiUsage` 里用模型的 `cost` 单价算出，无定价时为 0）。
-- 工具自带的用量：每个带 `usage` 的工具结果再加 `tokensUsed += usage.totalTokens`、`costUsed += usage.cost.total`。不认工具名：目前只有 `subagent` 带 usage（L4 把子代理各次回复的用量之和放在 `AgentToolResult.usage` 上，Pi 把它带到 toolResult 消息和 `turn_end` 的 `toolResults`），以后别的工具带上 usage 也会被计入。宿主已为子代理的每次请求记过账，这里只计入 goal 预算，不重复计费。
+- 计入的请求：token 为 `usage.input + usage.output + usage.cacheRead + usage.cacheWrite`，金额为条目的 `usage.cost.total`（L1 在 `toPiUsage` 里用当时模型的 `cost` 单价算出，L2 把它存进 transcript；没有它的旧条目按 0 计，换模型后也不按新单价重算）。
+- 工具自带的用量：带 `usage` 的工具结果加 `usage.totalTokens` 和 `usage.cost.total`（L2 把它存进 transcript）。不认工具名：目前只有 `subagent` 带 usage（L4 把子代理各次回复的用量之和放在 `AgentToolResult.usage` 上），以后别的工具带上 usage 也会被计入。宿主已为子代理的每次请求记过账，这里只计入 goal 预算，不重复计费。
 - `truncated`：assistant `stopReason === 'length'`。
 
 ### 6.2 `agent_before_settle`：按顺序判断
@@ -449,7 +455,7 @@ interface GoalPort {
 - 状态：`cherry.goal` 走 `TranscriptStateEntry`，L2 保证它在扩展绑定前就位，`session_start` 能读到。
 - 轮消息：`cherry.goal-round` 走带 `custom` 的 `message` 条目；重建后模型看到的历史与 live 一致。
 - 压缩：Pi 压缩只折叠消息，`custom` 状态条目不受影响；轮消息被折叠后目标仍由下一轮提示全文重注，不依赖历史。
-- 每轮重建 session：新 session 从 `session_start` 恢复目标但 `armed = false`，下一条用户消息是人类回合，模型或用户 `resume` 后才续跑。应用崩溃时同理，UI 显示为已暂停。宿主从哪里取 transcript（持久层或运行中会话的缓存）由接入 PR 决定，goal 不依赖这个选择。
+- 每轮重建 session：新 session 从 `session_start` 恢复目标但 `armed = false`，恢复的目标原本已武装时写一条 `armed: false` 的快照（不升 revision），让 branch 上的"是否武装"与 live 一致（L6 的通知轮按它计用量）；下一条用户消息是人类回合，模型或用户 `resume` 后才续跑（`active` 但未武装的目标 `resume` 只写一条 `armed: true` 的快照，同样不升 revision）。应用崩溃时同理，UI 显示为已暂停。宿主从哪里取 transcript（持久层或运行中会话的缓存）由接入 PR 决定，goal 不依赖这个选择。
 - 对 L3 的改动：`AskUserQuestionDetails` 增加 `outcome` 字段（见 7.3）。
 
 ## 12. 默认值
@@ -518,3 +524,7 @@ L4（前台子代理，PR #21578）已完成，L5 基于它实现：包内任务
 
 4. 工具结果的用量按调用开始时是否在 goal 轮里计（6.1）：`/goal pause` 时还在跑的前台子代理，返回后它的用量立即写进快照，`/goal resume` 不会越过它用掉的预算。3.1 节、第 4 节事件表和 6.1 标题里"`turn_end` 记账"的说法同步改为 `message_end`。
 5. 未接纳的轮消息也不进 verifier 的 `messages`（6.3）；压缩摘要器的输入、崩溃后同 key 的情形记为已知缺口。
+
+2026-10-16，按 PR #21607 第二轮评审修订（用量改为 branch 的纯函数）：
+
+6. 用量不再在内存里累计、也不以快照为准（5.1、6.1）：`goalUsage(branch, goalId)` 每次从 branch 算出，live 与重建一致；请求在停下前一律计入，工具结果的用量跟着发出调用的请求走。快照的 `tokensUsed` / `costUsed` 改为写入时的记录值。原来"请求结束、工具还没返回时重建会丢掉这次请求的用量"的问题随之消失；"工具结果到达时 goal 已停就单独写快照"的做法删除。快照新增 `armed`，`session_start` 对已武装的恢复目标写一条解除武装的快照（11）。轮中途停下时，停止快照带上到停下为止的进展（3.1 第 12 条）。
